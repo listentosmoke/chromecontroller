@@ -113,6 +113,7 @@ h1 {
 
 .input-group input {
   flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   border: 1px solid #333;
   border-radius: 6px;
@@ -128,6 +129,7 @@ h1 {
 
 .input-group select {
   flex: 1;
+  min-width: 0;
   padding: 8px 10px;
   border: 1px solid #333;
   border-radius: 6px;
@@ -164,6 +166,7 @@ h1 {
 }
 
 .input-group button, #save-key-btn {
+  flex-shrink: 0;
   padding: 8px 16px;
   border: none;
   border-radius: 6px;
