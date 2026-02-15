@@ -121,6 +121,7 @@ async function handleExecuteCommand(command) {
     if (!tab) throw new Error('No active tab found.');
 
     const MAX_STEPS = 15;
+    const MAX_RETRIES = 3; // retries per step when model fails to produce actions
     let lastSummary = '';
 
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -134,18 +135,60 @@ async function handleExecuteCommand(command) {
       const pageContext = await getPageContext(tab);
 
       // Build message — first step gets original command, continuations get "Continue"
-      const message = step === 0 ? command : `Continue. ${command}`;
+      let message = step === 0 ? command : `Continue the task. ${command}`;
 
-      broadcastStatus('busy', step === 0 ? 'Thinking...' : `Step ${step + 1}: Thinking...`);
-      const response = await aiClient.sendMessage(message, pageContext);
+      let response = null;
+      let gotActions = false;
+
+      // Inner retry loop: if model returns prose/no actions, send corrective prompt
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        if (shouldStop) break;
+
+        broadcastStatus('busy', step === 0 && attempt === 0
+          ? 'Thinking...'
+          : `Step ${step + 1}${attempt > 0 ? ` (retry ${attempt})` : ''}: Thinking...`);
+
+        response = await aiClient.sendMessage(message, pageContext);
+
+        if (shouldStop) break;
+
+        // Check if response has real executable actions
+        const hasRealActions = response.actions?.some(a => a.type !== 'describe');
+        if (response.actions && response.actions.length > 0 && hasRealActions) {
+          gotActions = true;
+          break; // Good response, proceed to execute
+        }
+
+        // Model returned no actions or prose — retry with corrective prompt
+        if (attempt < MAX_RETRIES - 1) {
+          broadcastLog('info', `Model returned no actions (attempt ${attempt + 1}/${MAX_RETRIES}), re-prompting...`);
+
+          // Remove the failed exchange from conversation history so it doesn't reinforce bad behavior
+          if (aiClient.conversationHistory.length >= 2) {
+            aiClient.conversationHistory.splice(-2, 2);
+          }
+
+          // Send corrective prompt that explicitly demands JSON with actions
+          message = `IMPORTANT: You must output JSON with an "actions" array containing click/type/select actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations.\n\nTask: ${command}\n\nLook at the Visual Page Map above. Find the correct answer and output a click action for it.`;
+        }
+      }
 
       if (shouldStop) break;
 
-      // Check for empty or describe-only response (model returned prose)
-      const hasRealActions = response.actions?.some(a => a.type !== 'describe');
-      if (!response.actions || response.actions.length === 0 || !hasRealActions) {
-        if (response.summary) broadcastLog('info', response.summary);
-        break;
+      // After all retries, if still no actions, log and continue to next step (don't break the whole loop)
+      if (!gotActions) {
+        broadcastLog('info', response?.summary || 'Model could not produce actions after retries.');
+        // Remove failed history entries
+        if (aiClient.conversationHistory.length >= 2) {
+          aiClient.conversationHistory.splice(-2, 2);
+        }
+        // On step 0 with no actions at all, we can't continue — break
+        if (step === 0) {
+          broadcastLog('error', 'Model failed to produce any actions. Try rephrasing the command or using a different model.');
+          break;
+        }
+        // On later steps, the task may already be partially done — try one more re-scan
+        continue;
       }
 
       // Execute actions
