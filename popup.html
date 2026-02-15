@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gemini Browser Controller</title>
+  <title>AI Browser Controller</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -24,7 +24,7 @@
       </button>
     </header>
 
-    <!-- Provider / API Key Setup -->
+    <!-- Setup: Provider + Key -->
     <section id="setup-section">
       <div class="field">
         <label for="provider-select">AI Provider</label>
@@ -35,20 +35,27 @@
       </div>
 
       <div class="field">
-        <label for="model-select">Model</label>
-        <select id="model-select"></select>
-      </div>
-
-      <div class="field">
         <label for="api-key-input">API Key</label>
         <div class="input-group">
           <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
-          <button id="save-key-btn">Save</button>
+          <button id="load-models-btn">Load Models</button>
         </div>
         <p class="hint" id="key-hint">Get a key at <a id="key-hint-link" href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a></p>
       </div>
 
+      <!-- Model select: hidden until models are loaded -->
+      <div class="field" id="model-field" class="hidden">
+        <label for="model-select">Model <span id="model-count" class="model-count"></span></label>
+        <div class="input-group">
+          <select id="model-select" disabled>
+            <option value="">-- Enter API key and click Load Models --</option>
+          </select>
+          <button id="save-btn" disabled>Save</button>
+        </div>
+      </div>
+
       <div id="key-error" class="error hidden"></div>
+      <div id="model-status" class="model-status hidden"></div>
     </section>
 
     <!-- Main Control Panel -->

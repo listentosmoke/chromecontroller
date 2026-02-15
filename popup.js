@@ -6,9 +6,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   const controlSection = document.getElementById('control-section');
   const providerSelect = document.getElementById('provider-select');
   const modelSelect = document.getElementById('model-select');
+  const modelCount = document.getElementById('model-count');
+  const modelField = document.getElementById('model-field');
   const apiKeyInput = document.getElementById('api-key-input');
-  const saveKeyBtn = document.getElementById('save-key-btn');
+  const loadModelsBtn = document.getElementById('load-models-btn');
+  const saveBtn = document.getElementById('save-btn');
   const keyError = document.getElementById('key-error');
+  const modelStatus = document.getElementById('model-status');
   const keyHintLink = document.getElementById('key-hint-link');
   const settingsBtn = document.getElementById('settings-btn');
   const activeModelSpan = document.getElementById('active-model');
@@ -20,48 +24,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   const stopBtn = document.getElementById('stop-btn');
   const openSidepanel = document.getElementById('open-sidepanel');
 
-  // ── Populate models when provider changes ──
+  let loadedModels = [];
 
-  function populateModels(provider) {
-    const providerConfig = PROVIDERS[provider];
-    modelSelect.innerHTML = '';
+  // ── Update hints when provider changes ──
 
-    const freeModels = providerConfig.models.filter(m => m.free);
-    const paidModels = providerConfig.models.filter(m => !m.free);
+  function updateProviderHints(provider) {
+    const config = PROVIDERS[provider];
+    apiKeyInput.placeholder = config.keyPlaceholder;
+    keyHintLink.href = config.keyHelp;
+    keyHintLink.textContent = config.keyHelpText;
 
-    if (freeModels.length > 0) {
-      const group = document.createElement('optgroup');
-      group.label = 'Free Tier';
-      for (const m of freeModels) {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.name;
-        group.appendChild(opt);
-      }
-      modelSelect.appendChild(group);
-    }
-
-    if (paidModels.length > 0) {
-      const group = document.createElement('optgroup');
-      group.label = 'Paid';
-      for (const m of paidModels) {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.name;
-        group.appendChild(opt);
-      }
-      modelSelect.appendChild(group);
-    }
-
-    modelSelect.value = providerConfig.defaultModel;
-
-    apiKeyInput.placeholder = providerConfig.keyPlaceholder;
-    keyHintLink.href = providerConfig.keyHelp;
-    keyHintLink.textContent = providerConfig.keyHelpText;
+    // Reset model list when provider changes
+    modelSelect.innerHTML = '<option value="">-- Click "Load Models" --</option>';
+    modelSelect.disabled = true;
+    saveBtn.disabled = true;
+    modelCount.textContent = '';
+    loadedModels = [];
   }
 
   providerSelect.addEventListener('change', () => {
-    populateModels(providerSelect.value);
+    updateProviderHints(providerSelect.value);
   });
 
   // ── Load saved settings ──
@@ -70,24 +52,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (saved.aiProvider) {
     providerSelect.value = saved.aiProvider;
   }
-  populateModels(providerSelect.value);
-  if (saved.aiModel) {
-    modelSelect.value = saved.aiModel;
-  }
+  updateProviderHints(providerSelect.value);
 
   if (saved.aiApiKey) {
     showControlPanel(saved.aiProvider, saved.aiModel);
   }
 
-  // ── Save settings ──
+  // ── Load Models button ──
 
-  saveKeyBtn.addEventListener('click', async () => {
+  loadModelsBtn.addEventListener('click', async () => {
     const provider = providerSelect.value;
-    const model = modelSelect.value;
     const key = apiKeyInput.value.trim();
 
     if (!key) {
-      showError('Please enter an API key.');
+      showError('Please enter an API key first.');
       return;
     }
 
@@ -100,10 +78,122 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    saveKeyBtn.textContent = 'Validating...';
-    saveKeyBtn.disabled = true;
+    loadModelsBtn.textContent = 'Loading...';
+    loadModelsBtn.disabled = true;
+    hideError();
+    showModelStatus('Fetching available models...');
 
     try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'FETCH_MODELS',
+        provider,
+        apiKey: key
+      });
+
+      if (!result.success) {
+        showError(result.error || 'Failed to fetch models.');
+        hideModelStatus();
+        return;
+      }
+
+      loadedModels = result.models;
+      populateModelDropdown(provider, result.models);
+      hideModelStatus();
+
+    } catch (err) {
+      showError('Failed to fetch models: ' + err.message);
+      hideModelStatus();
+    } finally {
+      loadModelsBtn.textContent = 'Load Models';
+      loadModelsBtn.disabled = false;
+    }
+  });
+
+  // ── Populate model dropdown from fetched data ──
+
+  function populateModelDropdown(provider, models) {
+    modelSelect.innerHTML = '';
+
+    if (models.length === 0) {
+      modelSelect.innerHTML = '<option value="">No models found</option>';
+      modelSelect.disabled = true;
+      saveBtn.disabled = true;
+      modelCount.textContent = '(0)';
+      return;
+    }
+
+    if (provider === 'openrouter') {
+      // Group: free first, then paid
+      const freeModels = models.filter(m => m.isFree);
+      const paidModels = models.filter(m => !m.isFree);
+
+      if (freeModels.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Free (${freeModels.length})`;
+        for (const m of freeModels) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.name;
+          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
+          group.appendChild(opt);
+        }
+        modelSelect.appendChild(group);
+      }
+
+      if (paidModels.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Paid (${paidModels.length})`;
+        for (const m of paidModels) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.name;
+          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
+          group.appendChild(opt);
+        }
+        modelSelect.appendChild(group);
+      }
+    } else {
+      // Gemini: flat list
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        let label = m.name;
+        if (m.inputTokenLimit) {
+          label += ` (${(m.inputTokenLimit / 1000).toFixed(0)}k ctx)`;
+        }
+        opt.textContent = label;
+        if (m.description) opt.title = m.description;
+        modelSelect.appendChild(opt);
+      }
+    }
+
+    modelCount.textContent = `(${models.length} available)`;
+    modelSelect.disabled = false;
+    saveBtn.disabled = false;
+
+    // Try to select a previously saved model
+    if (saved.aiModel && models.some(m => m.id === saved.aiModel)) {
+      modelSelect.value = saved.aiModel;
+    }
+  }
+
+  // ── Save button ──
+
+  saveBtn.addEventListener('click', async () => {
+    const provider = providerSelect.value;
+    const model = modelSelect.value;
+    const key = apiKeyInput.value.trim();
+
+    if (!key || !model) {
+      showError('Please select a model.');
+      return;
+    }
+
+    saveBtn.textContent = 'Saving...';
+    saveBtn.disabled = true;
+
+    try {
+      // Validate the key + set up client in background
       const result = await chrome.runtime.sendMessage({
         type: 'VALIDATE_API_KEY',
         provider,
@@ -119,27 +209,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         showControlPanel(provider, model);
       } else {
-        showError(result.error || 'Invalid API key.');
+        showError(result.error || 'Validation failed.');
       }
     } catch (err) {
-      showError('Failed to validate: ' + err.message);
+      showError('Failed to save: ' + err.message);
     } finally {
-      saveKeyBtn.textContent = 'Save';
-      saveKeyBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+      saveBtn.disabled = false;
     }
   });
 
-  // ── Settings button ──
+  // ── Settings button (go back to setup) ──
 
   settingsBtn.addEventListener('click', async () => {
     const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
     if (saved.aiProvider) providerSelect.value = saved.aiProvider;
-    populateModels(providerSelect.value);
-    if (saved.aiModel) modelSelect.value = saved.aiModel;
+    updateProviderHints(providerSelect.value);
     if (saved.aiApiKey) apiKeyInput.value = saved.aiApiKey;
 
     setupSection.classList.remove('hidden');
     controlSection.classList.add('hidden');
+
+    // Auto-load models if we have a key
+    if (saved.aiApiKey) {
+      loadModelsBtn.click();
+    }
   });
 
   // ── Send command ──
@@ -242,17 +336,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     setStatus('ready', 'Ready');
 
     if (provider && model) {
-      const providerConfig = PROVIDERS[provider];
-      const modelConfig = providerConfig?.models.find(m => m.id === model);
-      activeModelSpan.textContent = modelConfig?.name || model;
-      activeModelSpan.title = `${providerConfig?.name || provider} / ${model}`;
+      // Show short readable name
+      const shortName = model.split('/').pop().replace(/:free$/, '');
+      activeModelSpan.textContent = shortName;
+      activeModelSpan.title = `${PROVIDERS[provider]?.name || provider} / ${model}`;
     }
   }
 
   function showError(msg) {
     keyError.textContent = msg;
     keyError.classList.remove('hidden');
-    setTimeout(() => keyError.classList.add('hidden'), 5000);
+    setTimeout(() => keyError.classList.add('hidden'), 8000);
+  }
+
+  function hideError() {
+    keyError.classList.add('hidden');
+  }
+
+  function showModelStatus(msg) {
+    modelStatus.textContent = msg;
+    modelStatus.classList.remove('hidden');
+  }
+
+  function hideModelStatus() {
+    modelStatus.classList.add('hidden');
   }
 
   function setStatus(status, text) {

@@ -1,5 +1,5 @@
 // background.js — Service worker: orchestrates AI client, debugger, tab groups, and content scripts
-import { AIClient } from './ai-client.js';
+import { AIClient, fetchModels } from './ai-client.js';
 
 let aiClient = null;
 let isExecuting = false;
@@ -18,6 +18,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case 'VALIDATE_API_KEY':
       handleValidateKey(msg.provider, msg.apiKey, msg.model).then(sendResponse);
+      return true;
+
+    case 'FETCH_MODELS':
+      fetchModels(msg.provider, msg.apiKey)
+        .then(models => sendResponse({ success: true, models }))
+        .catch(err => sendResponse({ success: false, error: err.message }));
       return true;
 
     case 'EXECUTE_COMMAND':
