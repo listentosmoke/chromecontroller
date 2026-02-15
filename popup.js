@@ -76,8 +76,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    if (provider === 'gemini' && !key.startsWith('AIza')) {
-      showError('Gemini API keys start with "AIza".');
+    if (provider === 'groq' && !key.startsWith('gsk_')) {
+      showError('Groq API keys start with "gsk_".');
       return;
     }
     if (provider === 'openrouter' && !key.startsWith('sk-or-')) {
@@ -160,16 +160,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelSelect.appendChild(group);
       }
     } else {
-      // Gemini: flat list
+      // Groq: flat list
       for (const m of models) {
         const opt = document.createElement('option');
         opt.value = m.id;
         let label = m.name;
-        if (m.inputTokenLimit) {
-          label += ` (${(m.inputTokenLimit / 1000).toFixed(0)}k ctx)`;
+        if (m.contextWindow) {
+          label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
         }
         opt.textContent = label;
-        if (m.description) opt.title = m.description;
         modelSelect.appendChild(opt);
       }
     }

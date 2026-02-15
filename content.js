@@ -2,8 +2,8 @@
 
 (() => {
   // Prevent double-injection
-  if (window.__geminiControllerInjected) return;
-  window.__geminiControllerInjected = true;
+  if (window.__aiControllerInjected) return;
+  window.__aiControllerInjected = true;
 
   // Highlight overlay for showing which element is being targeted
   let highlightOverlay = null;
@@ -13,7 +13,7 @@
     if (highlightOverlay) return;
 
     highlightOverlay = document.createElement('div');
-    highlightOverlay.id = '__gemini-highlight';
+    highlightOverlay.id = '__ai-highlight';
     highlightOverlay.style.cssText = `
       position: fixed;
       pointer-events: none;
@@ -26,7 +26,7 @@
     `;
 
     highlightLabel = document.createElement('div');
-    highlightLabel.id = '__gemini-highlight-label';
+    highlightLabel.id = '__ai-highlight-label';
     highlightLabel.style.cssText = `
       position: fixed;
       pointer-events: none;
@@ -79,7 +79,7 @@
     if (highlightLabel) highlightLabel.style.display = 'none';
   }
 
-  // Get a simplified DOM representation for Gemini to understand the page
+  // Get a simplified DOM representation for the AI to understand the page
   function getSimplifiedDOM(maxDepth = 5, maxElements = 200) {
     let count = 0;
 
@@ -162,7 +162,7 @@
 
       // Skip script/style/hidden elements
       if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH'].includes(tag)) return null;
-      if (el.id === '__gemini-highlight' || el.id === '__gemini-highlight-label') return null;
+      if (el.id === '__ai-highlight' || el.id === '__ai-highlight-label') return null;
 
       if (!isVisible(el)) return null;
 

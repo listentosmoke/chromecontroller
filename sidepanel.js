@@ -19,7 +19,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Show short model name
     const shortName = saved.aiModel.split('/').pop().replace(/:free$/, '');
     modelBadge.textContent = shortName;
-    modelBadge.title = `${saved.aiProvider || 'gemini'} / ${saved.aiModel}`;
+    modelBadge.title = `${saved.aiProvider || 'groq'} / ${saved.aiModel}`;
   }
 
   // Auto-resize textarea
