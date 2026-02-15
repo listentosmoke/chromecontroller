@@ -1,5 +1,5 @@
 // background.js — Service worker: orchestrates AI client, debugger, tab groups, and content scripts
-import { AIClient } from './ai-client.js';
+import { AIClient, fetchModels } from './ai-client.js';
 
 let aiClient = null;
 let isExecuting = false;
@@ -10,6 +10,22 @@ let debuggerAttachedTabs = new Set();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+
+  // Migrate from older versions:
+  // 1. Remove legacy key name
+  // 2. Clear stale model if it was hardcoded in a previous version
+  chrome.storage.local.get(['geminiApiKey', 'aiModel']).then(saved => {
+    const removals = ['geminiApiKey'];
+    // These models were hardcoded before and may not exist on user's account
+    const staleModels = [
+      'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro',
+      'gemini-2.0-flash-lite', 'gemini-2.0-flash'
+    ];
+    if (saved.aiModel && staleModels.includes(saved.aiModel)) {
+      removals.push('aiModel');
+    }
+    chrome.storage.local.remove(removals);
+  });
 });
 
 // ── Message Router ──
@@ -18,6 +34,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case 'VALIDATE_API_KEY':
       handleValidateKey(msg.provider, msg.apiKey, msg.model).then(sendResponse);
+      return true;
+
+    case 'FETCH_MODELS':
+      fetchModels(msg.provider, msg.apiKey)
+        .then(models => sendResponse({ success: true, models }))
+        .catch(err => sendResponse({ success: false, error: err.message }));
       return true;
 
     case 'EXECUTE_COMMAND':
@@ -59,16 +81,25 @@ async function handleValidateKey(provider, apiKey, model) {
 // ── Ensure AI Client ──
 
 async function ensureClient() {
-  if (aiClient) return;
+  // Always re-check storage to pick up model/provider changes
   const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
-  if (saved.aiApiKey) {
+  if (!saved.aiApiKey) {
+    throw new Error('No API key configured. Open the popup to set one.');
+  }
+  if (!saved.aiModel) {
+    throw new Error('No model selected. Open the popup, load models, and pick one.');
+  }
+
+  // Rebuild client if settings changed or client doesn't exist
+  if (!aiClient ||
+      aiClient.provider !== (saved.aiProvider || 'gemini') ||
+      aiClient.model !== saved.aiModel ||
+      aiClient.apiKey !== saved.aiApiKey) {
     aiClient = new AIClient(
       saved.aiProvider || 'gemini',
       saved.aiApiKey,
       saved.aiModel
     );
-  } else {
-    throw new Error('No API key configured. Open the popup to set one.');
   }
 }
 

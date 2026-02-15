@@ -79,7 +79,7 @@ RULES:
 - For forms, clear existing text before typing if clearFirst is appropriate.
 - Always include a summary for the user.`;
 
-// ── Provider definitions ──
+// ── Provider definitions (static config only, models fetched dynamically) ──
 
 export const PROVIDERS = {
   gemini: {
@@ -88,17 +88,6 @@ export const PROVIDERS = {
     keyPlaceholder: 'AIza...',
     keyHelp: 'https://aistudio.google.com/apikey',
     keyHelpText: 'aistudio.google.com',
-    models: [
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', free: true },
-      { id: 'gemini-1.5-flash-8b', name: 'Gemini 1.5 Flash 8B', free: true },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', free: true },
-      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', free: true },
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', free: false },
-      { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash Preview', free: false },
-      { id: 'gemini-2.5-pro-preview-05-06', name: 'Gemini 2.5 Pro Preview', free: false },
-    ],
-    defaultModel: 'gemini-1.5-flash',
-    supportsVision: true,
   },
   openrouter: {
     name: 'OpenRouter',
@@ -106,29 +95,89 @@ export const PROVIDERS = {
     keyPlaceholder: 'sk-or-...',
     keyHelp: 'https://openrouter.ai/keys',
     keyHelpText: 'openrouter.ai/keys',
-    models: [
-      { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', free: false },
-      { id: 'google/gemini-2.5-flash-preview', name: 'Gemini 2.5 Flash', free: false },
-      { id: 'google/gemini-2.5-pro-preview', name: 'Gemini 2.5 Pro', free: false },
-      { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', free: false },
-      { id: 'anthropic/claude-haiku-4', name: 'Claude Haiku 4', free: false },
-      { id: 'openai/gpt-4o', name: 'GPT-4o', free: false },
-      { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', free: false },
-      { id: 'meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', free: false },
-      { id: 'deepseek/deepseek-chat-v3-0324', name: 'DeepSeek V3', free: false },
-      { id: 'mistralai/mistral-small-3.2-24b-instruct', name: 'Mistral Small 3.2', free: false },
-      { id: 'qwen/qwen3-235b-a22b', name: 'Qwen3 235B', free: false },
-      // Free models
-      { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp (Free)', free: true },
-      { id: 'meta-llama/llama-4-maverick:free', name: 'Llama 4 Maverick (Free)', free: true },
-      { id: 'deepseek/deepseek-chat-v3-0324:free', name: 'DeepSeek V3 (Free)', free: true },
-      { id: 'qwen/qwen3-235b-a22b:free', name: 'Qwen3 235B (Free)', free: true },
-      { id: 'mistralai/mistral-small-3.2-24b-instruct:free', name: 'Mistral Small 3.2 (Free)', free: true },
-    ],
-    defaultModel: 'google/gemini-2.0-flash-exp:free',
-    supportsVision: true,
   },
 };
+
+// ── Dynamic model fetching ──
+
+export async function fetchModels(provider, apiKey) {
+  if (provider === 'gemini') {
+    return await _fetchGeminiModels(apiKey);
+  } else if (provider === 'openrouter') {
+    return await _fetchOpenRouterModels(apiKey);
+  }
+  throw new Error('Unknown provider: ' + provider);
+}
+
+async function _fetchGeminiModels(apiKey) {
+  const response = await fetch(
+    `${PROVIDERS.gemini.baseUrl}/models?key=${apiKey}`
+  );
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.error?.message || 'Failed to fetch models');
+  }
+
+  const data = await response.json();
+  const models = [];
+
+  for (const m of (data.models || [])) {
+    // Only include models that support generateContent
+    const methods = m.supportedGenerationMethods || [];
+    if (!methods.includes('generateContent')) continue;
+
+    // Model name is like "models/gemini-2.0-flash" — extract the ID
+    const id = m.name.replace('models/', '');
+    const displayName = m.displayName || id;
+
+    models.push({
+      id,
+      name: displayName,
+      description: m.description || '',
+      inputTokenLimit: m.inputTokenLimit,
+      outputTokenLimit: m.outputTokenLimit,
+    });
+  }
+
+  // Sort: shorter names / newer versions first for readability
+  models.sort((a, b) => a.id.localeCompare(b.id));
+
+  return models;
+}
+
+async function _fetchOpenRouterModels(apiKey) {
+  const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/models`, {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    }
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.error?.message || 'Failed to fetch models');
+  }
+
+  const data = await response.json();
+  const models = [];
+
+  for (const m of (data.data || [])) {
+    models.push({
+      id: m.id,
+      name: m.name || m.id,
+      contextLength: m.context_length,
+      pricing: m.pricing,
+      isFree: m.pricing?.prompt === '0' && m.pricing?.completion === '0',
+    });
+  }
+
+  // Sort: free models first, then by name
+  models.sort((a, b) => {
+    if (a.isFree && !b.isFree) return -1;
+    if (!a.isFree && b.isFree) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return models;
+}
 
 // ── Unified AI Client ──
 
@@ -136,7 +185,7 @@ export class AIClient {
   constructor(provider, apiKey, model) {
     this.provider = provider;
     this.apiKey = apiKey;
-    this.model = model || PROVIDERS[provider]?.defaultModel;
+    this.model = model;
     this.conversationHistory = [];
   }
 
@@ -182,12 +231,10 @@ export class AIClient {
   async _sendGemini(userMessage, pageContext) {
     const contents = [];
 
-    // Add conversation history
     for (const entry of this.conversationHistory) {
       contents.push(entry);
     }
 
-    // Build user message parts
     const parts = [];
 
     if (pageContext) {
@@ -236,7 +283,12 @@ export class AIClient {
 
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(err.error?.message || `Gemini API error: ${response.status}`);
+      const msg = err.error?.message || `Gemini API error: ${response.status}`;
+      // Detect stale/invalid model and give actionable error
+      if (msg.includes('is not found') || msg.includes('not supported')) {
+        throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
+      }
+      throw new Error(msg);
     }
 
     const data = await response.json();
@@ -248,7 +300,6 @@ export class AIClient {
 
     const responseText = candidate.content.parts[0].text;
 
-    // Save to history (text only, no images)
     this.conversationHistory.push({ role: 'user', parts: [{ text: userMessage }] });
     this.conversationHistory.push({ role: 'model', parts: [{ text: responseText }] });
     this._trimHistory();
@@ -272,17 +323,14 @@ export class AIClient {
   }
 
   async _sendOpenRouter(userMessage, pageContext) {
-    // Build messages array (OpenAI format)
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT + '\n\nIMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no code fences, no explanation outside the JSON.' }
     ];
 
-    // Add conversation history
     for (const entry of this.conversationHistory) {
       messages.push(entry);
     }
 
-    // Build user message
     if (pageContext) {
       const content = [];
 
@@ -335,7 +383,6 @@ export class AIClient {
       throw new Error('No response from OpenRouter');
     }
 
-    // Save to history (OpenAI format)
     this.conversationHistory.push({ role: 'user', content: userMessage });
     this.conversationHistory.push({ role: 'assistant', content: responseText });
     this._trimHistory();
@@ -352,7 +399,6 @@ export class AIClient {
   }
 
   _parseResponse(responseText) {
-    // Strip markdown code fences if present
     let cleaned = responseText.trim();
     if (cleaned.startsWith('```')) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
