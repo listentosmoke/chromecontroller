@@ -1,119 +1,40 @@
 // ai-client.js — Unified AI client supporting Groq and OpenRouter
 
-const SYSTEM_PROMPT = `You are a browser automation assistant. You control a Chrome browser by issuing structured action commands. You receive a Visual Page Map that describes every visible element on the page — their positions, text content, and CSS selectors.
+const SYSTEM_PROMPT = `You are a browser automation bot. Output ONLY valid JSON.
 
-UNDERSTANDING THE VISUAL PAGE MAP:
-The Visual Page Map is a text-based spatial index of all visible page elements. Each line describes one element:
-  [*TAG] @(x,y WxH) sel="selector" "text content" value="..." [CHECKED/unchecked]
+You see a Visual Page Map of page elements. Each line:
+[*TAG] @(x,y WxH) sel="CSS selector" "text" [state]
+* = interactive | sel = CSS selector for your actions | [CHECKED]/[unchecked] | options=[...]
 
-- * prefix means the element is interactive (clickable, typeable, etc.)
-- @(x,y WxH) = position and size in pixels (x from left, y from top)
-- sel="..." = the CSS selector to use in your actions
-- "text" = visible text content
-- value="..." = current input value
-- [CHECKED]/[unchecked] = checkbox/radio state
-- [offscreen] = element exists but is not in the current viewport
-- options=[...] = dropdown options with > marking the selected one
+Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-IFRAME CONTENT:
-Pages often load content inside iframes. The Visual Page Map includes a separate section for each iframe:
-  === IFRAME CONTENT (frameId=N) ===
-To interact with elements inside an iframe, you MUST add "frameId": N to your action.
-Example: If an element appears under "=== IFRAME CONTENT (frameId=3) ===" with sel="#answer1",
-then click it with: {"type": "click", "selector": "#answer1", "frameId": 3}
-Elements in the main page (under "=== VISUAL PAGE MAP ===") do NOT need frameId.
+ACTIONS (use in "actions" array):
+click: {"type":"click","selector":"sel","frameId":N}
+type: {"type":"type","selector":"sel","text":"...","clearFirst":true,"frameId":N}
+select: {"type":"select","selector":"sel","value":"val","frameId":N}
+extract: {"type":"extract","selector":"sel","attribute":"textContent","frameId":N}
+evaluate: {"type":"evaluate","expression":"js code","frameId":N}
+snapshot: {"type":"snapshot"} re-read page after changes
+navigate: {"type":"navigate","url":"..."}
+scroll: {"type":"scroll","direction":"down","amount":300}
+wait: {"type":"wait","milliseconds":1000}
+keyboard: {"type":"keyboard","key":"Enter"}
+hover: {"type":"hover","selector":"sel"}
+screenshot: {"type":"screenshot"}
+describe: {"type":"describe","text":"..."}
+tab_new, tab_close, tab_switch, tab_list
 
-USE THE SELECTORS FROM THE VISUAL MAP. They are tested and valid. Do NOT guess selectors.
-
-When the user asks you to do something, respond with a JSON object containing an array of "actions" to perform. Each action has a "type" and parameters.
-
-Available action types:
-
-1. **click** — Click an element
-   {"type": "click", "selector": "CSS selector", "description": "what you're clicking"}
-   For iframe elements: add "frameId": N
-
-2. **type** — Type text into an input field
-   {"type": "type", "selector": "CSS selector", "text": "text to type", "clearFirst": true/false}
-   For iframe elements: add "frameId": N
-
-3. **navigate** — Go to a URL
-   {"type": "navigate", "url": "https://..."}
-
-4. **scroll** — Scroll the page
-   {"type": "scroll", "direction": "up|down|left|right", "amount": pixels, "selector": "optional element to scroll"}
-
-5. **wait** — Wait for a condition
-   {"type": "wait", "milliseconds": 1000}
-   or {"type": "wait", "selector": "CSS selector", "timeout": 5000}
-
-6. **extract** — Extract data from the page
-   {"type": "extract", "selector": "CSS selector", "attribute": "textContent|href|src|value|..."}
-   For iframe elements: add "frameId": N
-
-7. **screenshot** — Capture a screenshot (also returns an updated Visual Page Map from all frames)
-   {"type": "screenshot"}
-
-8. **snapshot** — Refresh the Visual Page Map from all frames (use this to re-read the page after actions change it)
-   {"type": "snapshot"}
-
-9. **evaluate** — Run JavaScript in the page (result is returned as text)
-   {"type": "evaluate", "expression": "document.title"}
-   For iframe: {"type": "evaluate", "expression": "document.body.innerText", "frameId": N}
-
-10. **keyboard** — Press a key
-    {"type": "keyboard", "key": "Enter|Tab|Escape|..."}
-
-11. **select** — Select an option from a dropdown
-    {"type": "select", "selector": "CSS selector", "value": "option value"}
-    For iframe elements: add "frameId": N
-
-12. **hover** — Hover over an element
-    {"type": "hover", "selector": "CSS selector"}
-
-13. **tab_new** — Open a new tab
-    {"type": "tab_new", "url": "https://..."}
-
-14. **tab_close** — Close the current tab
-    {"type": "tab_close"}
-
-15. **tab_switch** — Switch to a tab by index
-    {"type": "tab_switch", "index": 0}
-
-16. **tab_group_create** — Create a tab group
-    {"type": "tab_group_create", "name": "Group Name", "color": "blue|red|yellow|green|pink|purple|cyan|orange", "tabIds": []}
-
-17. **tab_group_add** — Add tabs to a group
-    {"type": "tab_group_add", "groupId": 1, "tabIds": []}
-
-18. **tab_group_remove** — Remove a tab group
-    {"type": "tab_group_remove", "groupId": 1}
-
-19. **tab_list** — List all open tabs and groups
-    {"type": "tab_list"}
-
-20. **describe** — Describe what you see or your reasoning
-    {"type": "describe", "text": "your description"}
-
-RESPONSE FORMAT — Always respond with valid JSON:
-{
-  "thinking": "Brief explanation of your plan",
-  "actions": [action1, action2, ...],
-  "summary": "Human-readable summary of what you did/will do"
-}
+OUTPUT THIS JSON:
+{"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
 RULES:
-- ALWAYS use the CSS selectors from the Visual Page Map — they are pre-validated.
-- Read the Visual Page Map carefully to understand what elements exist, their text, position, and state before choosing actions.
-- For surveys/forms: identify each question from the map text, find the corresponding input/select/radio elements by position (they will be near the question text), and use their selectors.
-- For radio buttons and checkboxes: check the [CHECKED]/[unchecked] state to see current selections.
-- For dropdowns: read the options=[...] to see available choices and use the "select" action with the option value.
-- If the page changes after an action (e.g. form submission, navigation, expanding sections), use "snapshot" to re-read the page before continuing.
-- IFRAMES: Elements inside "=== IFRAME CONTENT (frameId=N) ===" sections REQUIRE "frameId": N in your action. Without it, the action will fail with "Element not found". This is the #1 cause of failures — always check which section the element is in.
-- Chain multiple actions together for complex tasks.
-- If an action might fail, explain alternatives in your thinking.
-- For text inputs, clear existing text before typing if clearFirst is appropriate.
-- Always include a summary for the user.`;
+1. Output ONLY JSON. No markdown, no prose, no essays.
+2. Use selectors from the Visual Page Map exactly.
+3. For IFRAME elements, ALWAYS include "frameId":N.
+4. After page-changing clicks, add a snapshot action to see the new state.
+5. For multi-step tasks (e.g. "answer all items"): do the CURRENT step, set "done":false.
+6. Set "done":true ONLY when the entire task is fully complete.
+7. NEVER answer questions yourself. Your job is to CLICK the correct answer on the page.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
@@ -263,21 +184,20 @@ export class AIClient {
 
   async _sendGroq(userMessage, pageContext) {
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT + '\n\nIMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no code fences, no explanation outside the JSON.' }
+      { role: 'system', content: SYSTEM_PROMPT }
     ];
 
-    for (const entry of this.conversationHistory) {
+    // Add recent history only (keep small for small models)
+    const recentHistory = this.conversationHistory.slice(-6);
+    for (const entry of recentHistory) {
       messages.push(entry);
     }
 
-    let textContent = userMessage;
+    let textContent = `Command: ${userMessage}`;
     if (pageContext) {
-      textContent += `\n\n[Current Page Context]\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
+      textContent += `\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textContent += `\n${pageContext.visualMap}\n`;
-      }
-      if (pageContext.dom) {
-        textContent += `\nSimplified DOM:\n${pageContext.dom}\n`;
       }
     }
 
@@ -286,7 +206,7 @@ export class AIClient {
     const requestBody = {
       model: this.model,
       messages,
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: 4096,
       response_format: { type: 'json_object' },
     };
@@ -340,22 +260,20 @@ export class AIClient {
 
   async _sendOpenRouter(userMessage, pageContext) {
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT + '\n\nIMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no code fences, no explanation outside the JSON.' }
+      { role: 'system', content: SYSTEM_PROMPT }
     ];
 
-    for (const entry of this.conversationHistory) {
+    const recentHistory = this.conversationHistory.slice(-6);
+    for (const entry of recentHistory) {
       messages.push(entry);
     }
 
     if (pageContext) {
       const content = [];
 
-      let textPart = userMessage + `\n\n[Current Page Context]\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
+      let textPart = `Command: ${userMessage}\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textPart += `\n${pageContext.visualMap}\n`;
-      }
-      if (pageContext.dom) {
-        textPart += `\nSimplified DOM:\n${pageContext.dom}\n`;
       }
       content.push({ type: 'text', text: textPart });
 
@@ -412,25 +330,48 @@ export class AIClient {
   // ── Helpers ──
 
   _trimHistory() {
-    if (this.conversationHistory.length > 40) {
-      this.conversationHistory = this.conversationHistory.slice(-20);
+    // Keep history small for small models
+    if (this.conversationHistory.length > 10) {
+      this.conversationHistory = this.conversationHistory.slice(-6);
     }
   }
 
   _parseResponse(responseText) {
     let cleaned = responseText.trim();
+
+    // Strip markdown code fences
     if (cleaned.startsWith('```')) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
     }
 
+    // Try direct parse
     try {
       return JSON.parse(cleaned);
-    } catch {
-      return {
-        thinking: 'Response was not structured JSON',
-        actions: [{ type: 'describe', text: responseText }],
-        summary: responseText
-      };
+    } catch { /* continue */ }
+
+    // Try to find a JSON object with "actions" in the text
+    const jsonMatch = cleaned.match(/\{[\s\S]*"actions"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch { /* continue */ }
     }
+
+    // Try to find any JSON object
+    const anyJson = cleaned.match(/\{[\s\S]*\}/);
+    if (anyJson) {
+      try {
+        const parsed = JSON.parse(anyJson[0]);
+        if (parsed.actions) return parsed;
+      } catch { /* continue */ }
+    }
+
+    // Fallback: mark as done to prevent infinite retry loops
+    return {
+      thinking: 'Model returned prose instead of JSON',
+      actions: [{ type: 'describe', text: responseText.substring(0, 500) }],
+      summary: responseText.substring(0, 200),
+      done: true
+    };
   }
 }
