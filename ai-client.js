@@ -14,6 +14,11 @@ The Visual Page Map is a text-based spatial index of all visible page elements. 
 - [CHECKED]/[unchecked] = checkbox/radio state
 - [offscreen] = element exists but is not in the current viewport
 - options=[...] = dropdown options with > marking the selected one
+- iframe="..." = element is INSIDE an iframe. The iframe="..." value is the iframe's CSS selector.
+
+IFRAME ELEMENTS: When an element has iframe="..." it lives inside an iframe, NOT the main page. To interact with it, you MUST add "frameSelector" to your action. Example:
+  If the map shows: [*INPUT[radio]] sel="#answer1" iframe="#lessonContentIFrame"
+  Then click it with: {"type": "click", "selector": "#answer1", "frameSelector": "#lessonContentIFrame"}
 
 USE THE SELECTORS FROM THE VISUAL MAP. They are tested and valid. Do NOT guess selectors.
 
@@ -23,9 +28,11 @@ Available action types:
 
 1. **click** — Click an element
    {"type": "click", "selector": "CSS selector", "description": "what you're clicking"}
+   For elements inside iframes: add "frameSelector": "iframe CSS selector"
 
 2. **type** — Type text into an input field
    {"type": "type", "selector": "CSS selector", "text": "text to type", "clearFirst": true/false}
+   For elements inside iframes: add "frameSelector": "iframe CSS selector"
 
 3. **navigate** — Go to a URL
    {"type": "navigate", "url": "https://..."}
@@ -39,6 +46,7 @@ Available action types:
 
 6. **extract** — Extract data from the page
    {"type": "extract", "selector": "CSS selector", "attribute": "textContent|href|src|value|..."}
+   For elements inside iframes: add "frameSelector": "iframe CSS selector"
 
 7. **screenshot** — Capture a screenshot (also returns an updated Visual Page Map)
    {"type": "screenshot"}
@@ -46,14 +54,16 @@ Available action types:
 8. **snapshot** — Refresh the Visual Page Map without a screenshot (use this to re-read the page after actions change it)
    {"type": "snapshot"}
 
-9. **evaluate** — Run JavaScript in the page
+9. **evaluate** — Run JavaScript in the page (result is returned as text)
    {"type": "evaluate", "expression": "document.title"}
+   To run JS inside an iframe: {"type": "evaluate", "expression": "document.body.innerText", "frameSelector": "#iframeId"}
 
 10. **keyboard** — Press a key
     {"type": "keyboard", "key": "Enter|Tab|Escape|..."}
 
 11. **select** — Select an option from a dropdown
     {"type": "select", "selector": "CSS selector", "value": "option value"}
+    For elements inside iframes: add "frameSelector": "iframe CSS selector"
 
 12. **hover** — Hover over an element
     {"type": "hover", "selector": "CSS selector"}
@@ -96,6 +106,7 @@ RULES:
 - For radio buttons and checkboxes: check the [CHECKED]/[unchecked] state to see current selections.
 - For dropdowns: read the options=[...] to see available choices and use the "select" action with the option value.
 - If the page changes after an action (e.g. form submission, navigation, expanding sections), use "snapshot" to re-read the page before continuing.
+- IFRAMES: Many pages load content inside iframes. Elements with iframe="..." in the map REQUIRE "frameSelector" in your action. Without it, the action will fail with "Element not found". This is the #1 cause of failures — always check for the iframe marker.
 - Chain multiple actions together for complex tasks.
 - If an action might fail, explain alternatives in your thinking.
 - For text inputs, clear existing text before typing if clearFirst is appropriate.

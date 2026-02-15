@@ -374,6 +374,152 @@
       entries.push(entry);
     }
 
+    // Traverse into same-origin iframes
+    const iframes = document.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      if (entries.length >= 500) break;
+      let iframeDoc;
+      try {
+        iframeDoc = iframe.contentDocument;
+        if (!iframeDoc || !iframeDoc.body) continue;
+      } catch {
+        // Cross-origin iframe — note it but can't read
+        const rect = iframe.getBoundingClientRect();
+        entries.push({
+          tag: 'iframe',
+          selector: getSelector(iframe),
+          x: Math.round(rect.left + scrollX),
+          y: Math.round(rect.top + scrollY),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          visible: rect.top < vpH && rect.bottom > 0 && rect.left < vpW && rect.right > 0,
+          text: '[cross-origin iframe — use evaluate with frameSelector to access]',
+        });
+        continue;
+      }
+
+      const iframeRect = iframe.getBoundingClientRect();
+      const iframeSel = getSelector(iframe);
+      const offsetX = iframeRect.left + scrollX;
+      const offsetY = iframeRect.top + scrollY;
+
+      // Walk the iframe's DOM
+      const iframeWalker = iframeDoc.createTreeWalker(
+        iframeDoc.body,
+        NodeFilter.SHOW_ELEMENT,
+        {
+          acceptNode(el) {
+            if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+            try {
+              const style = iframe.contentWindow.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return NodeFilter.FILTER_REJECT;
+              }
+            } catch { /* skip style check */ }
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        }
+      );
+
+      // Build selector for iframe-internal elements
+      function getIframeSelector(el) {
+        if (el.id) return `#${CSS.escape(el.id)}`;
+        if (el.className && typeof el.className === 'string') {
+          const classes = el.className.trim().split(/\s+/).filter(c => c.length > 0);
+          for (const cls of classes) {
+            const sel = `.${CSS.escape(cls)}`;
+            try { if (iframeDoc.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+          }
+        }
+        if (el.getAttribute('aria-label')) {
+          const sel = `[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
+          try { if (iframeDoc.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+        }
+        if (el.name) {
+          const sel = `[name="${CSS.escape(el.name)}"]`;
+          try { if (iframeDoc.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+        }
+        const parts = [];
+        let current = el;
+        while (current && current !== iframeDoc.body && parts.length < 4) {
+          const tag = current.tagName.toLowerCase();
+          const parent = current.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
+            if (siblings.length > 1) {
+              const idx = siblings.indexOf(current) + 1;
+              parts.unshift(`${tag}:nth-of-type(${idx})`);
+            } else {
+              parts.unshift(tag);
+            }
+          } else {
+            parts.unshift(tag);
+          }
+          current = parent;
+        }
+        return parts.join(' > ');
+      }
+
+      let iframeNode;
+      while ((iframeNode = iframeWalker.nextNode())) {
+        if (entries.length >= 500) break;
+
+        const tag = iframeNode.tagName;
+        const rect = iframeNode.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+
+        const isInteractive = INTERACTIVE_TAGS.has(tag) ||
+          iframeNode.getAttribute('role') === 'button' ||
+          iframeNode.getAttribute('role') === 'link' ||
+          iframeNode.getAttribute('role') === 'tab' ||
+          iframeNode.getAttribute('role') === 'checkbox' ||
+          iframeNode.getAttribute('role') === 'radio' ||
+          iframeNode.getAttribute('role') === 'option' ||
+          iframeNode.getAttribute('role') === 'menuitem' ||
+          iframeNode.onclick !== null ||
+          iframeNode.getAttribute('tabindex') !== null;
+
+        const text = directText(iframeNode);
+        if (!text && !isInteractive) continue;
+
+        const entry = {
+          tag: tag.toLowerCase(),
+          selector: getIframeSelector(iframeNode),
+          x: Math.round(rect.left + offsetX),
+          y: Math.round(rect.top + offsetY),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          visible: (rect.top + iframeRect.top) < vpH && (rect.bottom + iframeRect.top) > 0,
+          inIframe: iframeSel,
+        };
+
+        if (text) entry.text = text.substring(0, 200);
+        if (isInteractive) entry.interactive = true;
+
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+          entry.inputType = iframeNode.type || 'text';
+          if (iframeNode.value) entry.value = iframeNode.value.substring(0, 100);
+          if (iframeNode.placeholder) entry.placeholder = iframeNode.placeholder;
+          if (tag === 'INPUT' && (iframeNode.type === 'checkbox' || iframeNode.type === 'radio')) {
+            entry.checked = iframeNode.checked;
+          }
+          if (tag === 'SELECT') {
+            entry.options = Array.from(iframeNode.options).slice(0, 20).map(o => ({
+              value: o.value,
+              text: o.textContent.trim().substring(0, 80),
+              selected: o.selected
+            }));
+          }
+        }
+
+        if (tag === 'A' && iframeNode.href) entry.href = iframeNode.href;
+        if (iframeNode.getAttribute('aria-label')) entry.ariaLabel = iframeNode.getAttribute('aria-label');
+        if (iframeNode.disabled) entry.disabled = true;
+
+        entries.push(entry);
+      }
+    }
+
     // Sort by vertical position (top-to-bottom), then left-to-right
     entries.sort((a, b) => a.y - b.y || a.x - b.x);
 
@@ -419,16 +565,49 @@
         parts.push(`options=[${optText}]`);
       }
 
+      // Iframe marker
+      if (e.inIframe) {
+        parts.push(`iframe="${e.inIframe}"`);
+      }
+
       lines.push(parts.join(' '));
     }
 
     return lines.join('\n');
   }
 
-  // Action executors
-  async function clickElement(selector) {
+  // Resolve an element, optionally inside an iframe
+  function resolveElement(selector, frameSelector) {
+    if (frameSelector) {
+      const iframe = document.querySelector(frameSelector);
+      if (!iframe) throw new Error(`Iframe not found: ${frameSelector}`);
+      if (!iframe.contentDocument) throw new Error(`Cannot access iframe (cross-origin): ${frameSelector}`);
+      const el = iframe.contentDocument.querySelector(selector);
+      if (!el) throw new Error(`Element not found in iframe ${frameSelector}: ${selector}`);
+      return el;
+    }
     const el = document.querySelector(selector);
     if (!el) throw new Error(`Element not found: ${selector}`);
+    return el;
+  }
+
+  function resolveElements(selector, frameSelector) {
+    if (frameSelector) {
+      const iframe = document.querySelector(frameSelector);
+      if (!iframe) throw new Error(`Iframe not found: ${frameSelector}`);
+      if (!iframe.contentDocument) throw new Error(`Cannot access iframe (cross-origin): ${frameSelector}`);
+      const els = iframe.contentDocument.querySelectorAll(selector);
+      if (els.length === 0) throw new Error(`No elements found in iframe ${frameSelector}: ${selector}`);
+      return els;
+    }
+    const els = document.querySelectorAll(selector);
+    if (els.length === 0) throw new Error(`No elements found: ${selector}`);
+    return els;
+  }
+
+  // Action executors
+  async function clickElement(selector, frameSelector) {
+    const el = resolveElement(selector, frameSelector);
 
     highlightElement(selector, 'clicking');
 
@@ -452,9 +631,8 @@
     return { success: true, text: el.textContent?.substring(0, 100) };
   }
 
-  async function typeText(selector, text, clearFirst = true) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function typeText(selector, text, clearFirst = true, frameSelector) {
+    const el = resolveElement(selector, frameSelector);
 
     highlightElement(selector, 'typing');
     el.focus();
@@ -480,9 +658,8 @@
     return { success: true };
   }
 
-  async function hoverElement(selector) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function hoverElement(selector, frameSelector) {
+    const el = resolveElement(selector, frameSelector);
 
     highlightElement(selector, 'hovering');
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -524,9 +701,8 @@
     return { success: true };
   }
 
-  function extractData(selector, attribute = 'textContent') {
-    const elements = document.querySelectorAll(selector);
-    if (elements.length === 0) throw new Error(`No elements found: ${selector}`);
+  function extractData(selector, attribute = 'textContent', frameSelector) {
+    const elements = resolveElements(selector, frameSelector);
 
     const results = Array.from(elements).map(el => {
       if (attribute === 'textContent') return el.textContent.trim();
@@ -537,10 +713,17 @@
     return { success: true, data: results };
   }
 
-  function evaluateExpression(expression) {
+  function evaluateExpression(expression, frameSelector) {
     try {
-      const result = eval(expression);
-      return { success: true, result: String(result).substring(0, 5000) };
+      let context = window;
+      if (frameSelector) {
+        const iframe = document.querySelector(frameSelector);
+        if (!iframe) throw new Error(`Iframe not found: ${frameSelector}`);
+        if (!iframe.contentDocument) throw new Error(`Cannot access iframe (cross-origin): ${frameSelector}`);
+        context = iframe.contentWindow;
+      }
+      const result = context.eval(expression);
+      return { success: true, text: String(result).substring(0, 5000) };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -559,9 +742,8 @@
     return { success: true };
   }
 
-  async function selectOption(selector, value) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function selectOption(selector, value, frameSelector) {
+    const el = resolveElement(selector, frameSelector);
 
     highlightElement(selector, 'selecting');
     el.value = value;
@@ -574,12 +756,13 @@
     return { success: true };
   }
 
-  async function waitForSelector(selector, timeout = 5000) {
+  async function waitForSelector(selector, timeout = 5000, frameSelector) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
-      if (document.querySelector(selector)) {
+      try {
+        resolveElement(selector, frameSelector);
         return { success: true };
-      }
+      } catch { /* not found yet */ }
       await sleep(200);
     }
     throw new Error(`Timeout waiting for: ${selector}`);
@@ -628,26 +811,27 @@
   });
 
   async function handleAction(action) {
+    const f = action.frameSelector; // optional iframe selector for all actions
     switch (action.type) {
       case 'click':
-        return clickElement(action.selector);
+        return clickElement(action.selector, f);
       case 'type':
-        return typeText(action.selector, action.text, action.clearFirst !== false);
+        return typeText(action.selector, action.text, action.clearFirst !== false, f);
       case 'hover':
-        return hoverElement(action.selector);
+        return hoverElement(action.selector, f);
       case 'scroll':
         return scrollPage(action.direction, action.amount, action.selector);
       case 'extract':
-        return extractData(action.selector, action.attribute);
+        return extractData(action.selector, action.attribute, f);
       case 'evaluate':
-        return evaluateExpression(action.expression);
+        return evaluateExpression(action.expression, f);
       case 'keyboard':
         return pressKey(action.key);
       case 'select':
-        return selectOption(action.selector, action.value);
+        return selectOption(action.selector, action.value, f);
       case 'wait':
         if (action.selector) {
-          return waitForSelector(action.selector, action.timeout);
+          return waitForSelector(action.selector, action.timeout, f);
         }
         await sleep(action.milliseconds || 1000);
         return { success: true };
