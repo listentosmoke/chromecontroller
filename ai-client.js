@@ -37,7 +37,10 @@ RULES:
 5. For multi-step tasks: do the CURRENT step, set "done":false.
 6. Set "done":true ONLY when the entire task is fully complete.
 7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
-8. Your response MUST have an "actions" array or it will be rejected.`;
+8. Your response MUST have an "actions" array or it will be rejected.
+9. BEFORE clicking Next: ALWAYS select an answer first. Read the question, read ALL options, pick the correct one, click it. NEVER click Next without answering.
+10. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option to change it.
+11. If a modal/dialog says items are unanswered, click Cancel/Go Back, then answer the current item.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
