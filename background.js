@@ -190,6 +190,7 @@ async function getPageContext(tab) {
     const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' });
     if (domResponse) {
       context.dom = domResponse.dom;
+      context.visualMap = domResponse.visualMap;
     }
   } catch {
     try {
@@ -200,6 +201,7 @@ async function getPageContext(tab) {
       const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' });
       if (domResponse) {
         context.dom = domResponse.dom;
+        context.visualMap = domResponse.visualMap;
       }
     } catch (injectErr) {
       context.dom = '[Could not inspect page DOM — may be a restricted page]';
@@ -229,6 +231,7 @@ async function executeAction(action, tab) {
     case 'select':
     case 'wait':
     case 'describe':
+    case 'snapshot':
       return await chrome.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_ACTION',
         action
@@ -239,9 +242,16 @@ async function executeAction(action, tab) {
       await waitForTabLoad(tab.id);
       return { success: true };
 
-    case 'screenshot':
+    case 'screenshot': {
       const screenshot = await captureScreenshot(tab.id);
-      return { success: true, screenshot };
+      // Also grab the visual map so non-vision models get useful text data
+      let visualMap;
+      try {
+        const mapResp = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VISUAL_MAP' });
+        visualMap = mapResp?.visualMap;
+      } catch { /* content script may not be available */ }
+      return { success: true, screenshot, text: visualMap };
+    }
 
     case 'tab_new':
       const newTab = await chrome.tabs.create({ url: action.url || 'about:blank' });
