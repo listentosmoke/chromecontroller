@@ -40,6 +40,19 @@ h1 {
   font-weight: 600;
 }
 
+.model-badge {
+  font-size: 9px;
+  color: #4285F4;
+  background: rgba(66, 133, 244, 0.1);
+  border: 1px solid rgba(66, 133, 244, 0.25);
+  padding: 1px 6px;
+  border-radius: 8px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .header-actions button {
   background: none;
   border: 1px solid #333;

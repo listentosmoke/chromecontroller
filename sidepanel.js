@@ -1,6 +1,6 @@
-// sidepanel.js — Side panel chat UI for Gemini Browser Controller
+// sidepanel.js — Side panel chat UI for AI Browser Controller
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const messagesContainer = document.getElementById('messages');
   const chatInput = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
@@ -8,9 +8,19 @@ document.addEventListener('DOMContentLoaded', () => {
   const clearChat = document.getElementById('clear-chat');
   const statusDot = document.querySelector('.dot');
   const statusLabel = document.getElementById('status-label');
+  const modelBadge = document.getElementById('model-badge');
 
   let currentActionLog = null;
   let isExecuting = false;
+
+  // Show active model
+  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel']);
+  if (saved.aiModel) {
+    // Show short model name
+    const shortName = saved.aiModel.split('/').pop().replace(/:free$/, '');
+    modelBadge.textContent = shortName;
+    modelBadge.title = `${saved.aiProvider || 'gemini'} / ${saved.aiModel}`;
+  }
 
   // Auto-resize textarea
   chatInput.addEventListener('input', () => {

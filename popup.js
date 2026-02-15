@@ -1,12 +1,17 @@
-// popup.js — Gemini Browser Controller popup logic
+// popup.js — AI Browser Controller popup logic
+import { PROVIDERS } from './ai-client.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
   const setupSection = document.getElementById('setup-section');
   const controlSection = document.getElementById('control-section');
+  const providerSelect = document.getElementById('provider-select');
+  const modelSelect = document.getElementById('model-select');
   const apiKeyInput = document.getElementById('api-key-input');
   const saveKeyBtn = document.getElementById('save-key-btn');
   const keyError = document.getElementById('key-error');
-  const changeKeyBtn = document.getElementById('change-key-btn');
+  const keyHintLink = document.getElementById('key-hint-link');
+  const settingsBtn = document.getElementById('settings-btn');
+  const activeModelSpan = document.getElementById('active-model');
   const commandInput = document.getElementById('command-input');
   const sendBtn = document.getElementById('send-btn');
   const statusDot = document.getElementById('status-dot');
@@ -15,21 +20,83 @@ document.addEventListener('DOMContentLoaded', async () => {
   const stopBtn = document.getElementById('stop-btn');
   const openSidepanel = document.getElementById('open-sidepanel');
 
-  // Check for existing API key
-  const { geminiApiKey } = await chrome.storage.local.get('geminiApiKey');
-  if (geminiApiKey) {
-    showControlPanel();
+  // ── Populate models when provider changes ──
+
+  function populateModels(provider) {
+    const providerConfig = PROVIDERS[provider];
+    modelSelect.innerHTML = '';
+
+    const freeModels = providerConfig.models.filter(m => m.free);
+    const paidModels = providerConfig.models.filter(m => !m.free);
+
+    if (freeModels.length > 0) {
+      const group = document.createElement('optgroup');
+      group.label = 'Free Tier';
+      for (const m of freeModels) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name;
+        group.appendChild(opt);
+      }
+      modelSelect.appendChild(group);
+    }
+
+    if (paidModels.length > 0) {
+      const group = document.createElement('optgroup');
+      group.label = 'Paid';
+      for (const m of paidModels) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name;
+        group.appendChild(opt);
+      }
+      modelSelect.appendChild(group);
+    }
+
+    modelSelect.value = providerConfig.defaultModel;
+
+    apiKeyInput.placeholder = providerConfig.keyPlaceholder;
+    keyHintLink.href = providerConfig.keyHelp;
+    keyHintLink.textContent = providerConfig.keyHelpText;
   }
 
-  // Save API key
+  providerSelect.addEventListener('change', () => {
+    populateModels(providerSelect.value);
+  });
+
+  // ── Load saved settings ──
+
+  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+  if (saved.aiProvider) {
+    providerSelect.value = saved.aiProvider;
+  }
+  populateModels(providerSelect.value);
+  if (saved.aiModel) {
+    modelSelect.value = saved.aiModel;
+  }
+
+  if (saved.aiApiKey) {
+    showControlPanel(saved.aiProvider, saved.aiModel);
+  }
+
+  // ── Save settings ──
+
   saveKeyBtn.addEventListener('click', async () => {
+    const provider = providerSelect.value;
+    const model = modelSelect.value;
     const key = apiKeyInput.value.trim();
+
     if (!key) {
       showError('Please enter an API key.');
       return;
     }
-    if (!key.startsWith('AIza')) {
-      showError('Invalid key format. Gemini API keys start with "AIza".');
+
+    if (provider === 'gemini' && !key.startsWith('AIza')) {
+      showError('Gemini API keys start with "AIza".');
+      return;
+    }
+    if (provider === 'openrouter' && !key.startsWith('sk-or-')) {
+      showError('OpenRouter API keys start with "sk-or-".');
       return;
     }
 
@@ -37,35 +104,46 @@ document.addEventListener('DOMContentLoaded', async () => {
     saveKeyBtn.disabled = true;
 
     try {
-      // Validate the key by making a test request
-      const valid = await chrome.runtime.sendMessage({
+      const result = await chrome.runtime.sendMessage({
         type: 'VALIDATE_API_KEY',
-        apiKey: key
+        provider,
+        apiKey: key,
+        model
       });
 
-      if (valid.success) {
-        await chrome.storage.local.set({ geminiApiKey: key });
-        showControlPanel();
+      if (result.success) {
+        await chrome.storage.local.set({
+          aiProvider: provider,
+          aiModel: model,
+          aiApiKey: key
+        });
+        showControlPanel(provider, model);
       } else {
-        showError(valid.error || 'Invalid API key.');
+        showError(result.error || 'Invalid API key.');
       }
     } catch (err) {
-      showError('Failed to validate key: ' + err.message);
+      showError('Failed to validate: ' + err.message);
     } finally {
       saveKeyBtn.textContent = 'Save';
       saveKeyBtn.disabled = false;
     }
   });
 
-  // Change API key
-  changeKeyBtn.addEventListener('click', async () => {
-    await chrome.storage.local.remove('geminiApiKey');
+  // ── Settings button ──
+
+  settingsBtn.addEventListener('click', async () => {
+    const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+    if (saved.aiProvider) providerSelect.value = saved.aiProvider;
+    populateModels(providerSelect.value);
+    if (saved.aiModel) modelSelect.value = saved.aiModel;
+    if (saved.aiApiKey) apiKeyInput.value = saved.aiApiKey;
+
     setupSection.classList.remove('hidden');
     controlSection.classList.add('hidden');
-    apiKeyInput.value = '';
   });
 
-  // Send command
+  // ── Send command ──
+
   sendBtn.addEventListener('click', () => sendCommand());
   commandInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -74,7 +152,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Quick action buttons
+  // ── Quick action buttons ──
+
   document.querySelectorAll('.action-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const action = btn.dataset.action;
@@ -97,7 +176,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Open side panel
+  // ── Open side panel ──
+
   openSidepanel.addEventListener('click', async () => {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -108,7 +188,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Listen for status updates from background
+  // ── Listen for background messages ──
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'STATUS_UPDATE') {
       setStatus(msg.status, msg.text);
@@ -120,6 +201,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       stopBtn.disabled = !msg.running;
     }
   });
+
+  // ── Helpers ──
 
   async function sendCommand(overrideText) {
     const text = overrideText || commandInput.value.trim();
@@ -153,10 +236,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     stopBtn.disabled = true;
   }
 
-  function showControlPanel() {
+  function showControlPanel(provider, model) {
     setupSection.classList.add('hidden');
     controlSection.classList.remove('hidden');
     setStatus('ready', 'Ready');
+
+    if (provider && model) {
+      const providerConfig = PROVIDERS[provider];
+      const modelConfig = providerConfig?.models.find(m => m.id === model);
+      activeModelSpan.textContent = modelConfig?.name || model;
+      activeModelSpan.title = `${providerConfig?.name || provider} / ${model}`;
+    }
   }
 
   function showError(msg) {
@@ -181,7 +271,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     li.textContent = text;
     actionLogList.insertBefore(li, actionLogList.firstChild);
 
-    // Keep only last 50 entries
     while (actionLogList.children.length > 50) {
       actionLogList.removeChild(actionLogList.lastChild);
     }
