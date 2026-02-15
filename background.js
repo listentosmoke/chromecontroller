@@ -189,26 +189,33 @@ async function handleExecuteCommand(command) {
 async function getPageContext(tab) {
   const context = { url: tab.url, title: tab.title };
 
+  // Ensure content script is injected in ALL frames (including cross-origin iframes)
   try {
-    const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' });
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      files: ['content.js']
+    });
+  } catch { /* may fail on restricted pages, content_scripts manifest handles most cases */ }
+
+  // Get DOM from top frame (frameId 0)
+  try {
+    const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' }, { frameId: 0 });
     if (domResponse) {
       context.dom = domResponse.dom;
-      context.visualMap = domResponse.visualMap;
     }
   } catch {
+    context.dom = '[Could not inspect page DOM — may be a restricted page]';
+  }
+
+  // Collect visual maps from ALL frames (top + iframes)
+  try {
+    context.visualMap = await collectAllFrameVisualMaps(tab.id);
+  } catch {
+    // Fall back to top frame only
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      });
-      const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' });
-      if (domResponse) {
-        context.dom = domResponse.dom;
-        context.visualMap = domResponse.visualMap;
-      }
-    } catch (injectErr) {
-      context.dom = '[Could not inspect page DOM — may be a restricted page]';
-    }
+      const resp = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VISUAL_MAP' }, { frameId: 0 });
+      context.visualMap = resp?.visualMap;
+    } catch { /* no visual map */ }
   }
 
   try {
@@ -220,9 +227,75 @@ async function getPageContext(tab) {
   return context;
 }
 
+// ── Multi-Frame Visual Map Collection ──
+
+async function collectAllFrameVisualMaps(tabId) {
+  // Discover all frames by running a lightweight script in each
+  let frameInfos;
+  try {
+    frameInfos = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => ({
+        url: location.href,
+        isTop: window === window.top,
+      })
+    });
+  } catch {
+    // Fall back to top frame only
+    const resp = await chrome.tabs.sendMessage(tabId, { type: 'GET_VISUAL_MAP' }, { frameId: 0 });
+    return resp?.visualMap || '';
+  }
+
+  const maps = [];
+
+  for (const frame of frameInfos) {
+    try {
+      const resp = await chrome.tabs.sendMessage(
+        tabId,
+        { type: 'GET_VISUAL_MAP' },
+        { frameId: frame.frameId }
+      );
+      if (resp?.visualMap) {
+        maps.push({
+          frameId: frame.frameId,
+          url: frame.result.url,
+          isTop: frame.result.isTop,
+          map: resp.visualMap
+        });
+      }
+    } catch { /* frame may not have content script or may be restricted */ }
+  }
+
+  if (maps.length === 0) return '';
+  if (maps.length === 1) return maps[0].map;
+
+  // Merge: top frame first, then child frames annotated with frameId
+  let merged = '';
+  // Top frame first
+  const topFrame = maps.find(m => m.isTop);
+  if (topFrame) {
+    merged += topFrame.map + '\n\n';
+  }
+  // Child frames
+  for (const m of maps) {
+    if (m.isTop) continue;
+    const header = `=== IFRAME CONTENT (frameId=${m.frameId}) ===`;
+    const mapContent = m.map.replace('=== VISUAL PAGE MAP ===', header);
+    merged += mapContent + '\n\n';
+  }
+
+  return merged.trim();
+}
+
 // ── Action Execution ──
 
 async function executeAction(action, tab) {
+  // Route DOM actions to the correct frame
+  const sendOpts = {};
+  if (action.frameId !== undefined && action.frameId !== null) {
+    sendOpts.frameId = action.frameId;
+  }
+
   switch (action.type) {
     case 'click':
     case 'type':
@@ -234,11 +307,16 @@ async function executeAction(action, tab) {
     case 'select':
     case 'wait':
     case 'describe':
-    case 'snapshot':
       return await chrome.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_ACTION',
         action
-      });
+      }, sendOpts);
+
+    case 'snapshot': {
+      // Collect fresh visual maps from ALL frames
+      const visualMap = await collectAllFrameVisualMaps(tab.id);
+      return { success: true, text: visualMap };
+    }
 
     case 'navigate':
       await chrome.tabs.update(tab.id, { url: action.url });
@@ -247,12 +325,8 @@ async function executeAction(action, tab) {
 
     case 'screenshot': {
       const screenshot = await captureScreenshot(tab.id);
-      // Also grab the visual map so non-vision models get useful text data
-      let visualMap;
-      try {
-        const mapResp = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VISUAL_MAP' });
-        visualMap = mapResp?.visualMap;
-      } catch { /* content script may not be available */ }
+      // Also collect visual maps from all frames
+      const visualMap = await collectAllFrameVisualMaps(tab.id);
       return { success: true, screenshot, text: visualMap };
     }
 
