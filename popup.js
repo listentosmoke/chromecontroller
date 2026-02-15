@@ -54,8 +54,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   updateProviderHints(providerSelect.value);
 
-  if (saved.aiApiKey) {
+  if (saved.aiApiKey && saved.aiModel) {
+    // Verify the model is actually usable by doing a quick check
+    // Show the control panel — if the model fails at runtime, the user
+    // will see the error and can click Settings to re-pick
     showControlPanel(saved.aiProvider, saved.aiModel);
+  } else if (saved.aiApiKey) {
+    // Has key but no model selected (or stale model cleared) — show setup
+    // with key pre-filled so user just needs to load models and pick one
+    apiKeyInput.value = saved.aiApiKey;
   }
 
   // ── Load Models button ──

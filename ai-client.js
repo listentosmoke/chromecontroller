@@ -283,7 +283,12 @@ export class AIClient {
 
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(err.error?.message || `Gemini API error: ${response.status}`);
+      const msg = err.error?.message || `Gemini API error: ${response.status}`;
+      // Detect stale/invalid model and give actionable error
+      if (msg.includes('is not found') || msg.includes('not supported')) {
+        throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
+      }
+      throw new Error(msg);
     }
 
     const data = await response.json();
