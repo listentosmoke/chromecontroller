@@ -130,12 +130,22 @@ async function handleExecuteCommand(command) {
         break;
       }
 
+      // Re-inject content scripts (iframes may have navigated between steps)
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ['content.js']
+        });
+      } catch { /* restricted page */ }
+
       // Gather fresh page context each step
       broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
       const pageContext = await getPageContext(tab);
 
-      // Build message — first step gets original command, continuations get "Continue"
-      let message = step === 0 ? command : `Continue the task. ${command}`;
+      // Build message — first step gets original command, continuations remind about remaining work
+      let message = step === 0
+        ? command
+        : `Continue the task: ${command}\n\nYou just completed step ${step}. Check the Visual Page Map carefully — look inside IFRAME sections for quiz items, questions, or forms that still need to be answered. If you see items remaining, answer them and click Next. Only set done=true when there are truly NO more items left.`;
 
       let response = null;
       let gotActions = false;
@@ -229,8 +239,10 @@ async function handleExecuteCommand(command) {
         break;
       }
 
-      // Brief pause before next iteration to let page settle
-      await new Promise(r => setTimeout(r, 800));
+      // Longer pause if actions included clicks (page/iframe may need to reload)
+      const hadClicks = response.actions.some(a => a.type === 'click');
+      const pauseMs = hadClicks ? 2500 : 800;
+      await new Promise(r => setTimeout(r, pauseMs));
     }
 
     broadcastStatus('ready', 'Ready');
@@ -376,8 +388,44 @@ async function executeAction(action, tab) {
       }, sendOpts);
 
     case 'snapshot': {
-      // Collect fresh visual maps from ALL frames
-      const visualMap = await collectAllFrameVisualMaps(tab.id);
+      // Wait for iframes to load after page-changing actions (e.g. clicking Next)
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Re-inject content scripts into all frames (new iframes from navigation won't have it)
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ['content.js']
+        });
+      } catch { /* restricted page */ }
+
+      let visualMap = await collectAllFrameVisualMaps(tab.id);
+
+      // If page has child iframes but snapshot didn't capture them, wait and retry
+      if (!visualMap.includes('=== IFRAME CONTENT')) {
+        try {
+          const frameCheck = await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            func: () => window !== window.top
+          });
+          const hasChildFrames = frameCheck.some(f => f.result === true);
+          if (hasChildFrames) {
+            for (let retry = 0; retry < 3; retry++) {
+              await new Promise(r => setTimeout(r, 2000));
+              // Re-inject in case iframe just finished loading
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId: tab.id, allFrames: true },
+                  files: ['content.js']
+                });
+              } catch { /* ignore */ }
+              visualMap = await collectAllFrameVisualMaps(tab.id);
+              if (visualMap.includes('=== IFRAME CONTENT')) break;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
       return { success: true, text: visualMap };
     }
 
