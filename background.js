@@ -115,35 +115,47 @@ async function handleExecuteCommand(command) {
 
   try {
     await ensureClient();
-    broadcastStatus('busy', 'Analyzing page...');
     broadcastExecutionState(true);
 
-    // Get the active tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) throw new Error('No active tab found.');
 
-    // Gather page context
-    const pageContext = await getPageContext(tab);
+    const MAX_STEPS = 15;
+    let lastSummary = '';
 
-    // Send to AI
-    broadcastStatus('busy', 'Thinking...');
-    const response = await aiClient.sendMessage(command, pageContext);
+    for (let step = 0; step < MAX_STEPS; step++) {
+      if (shouldStop) {
+        broadcastLog('info', 'Stopped by user');
+        break;
+      }
 
-    if (shouldStop) {
-      broadcastStatus('ready', 'Stopped');
-      return { result: 'Execution stopped by user.' };
-    }
+      // Gather fresh page context each step
+      broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
+      const pageContext = await getPageContext(tab);
 
-    // Execute actions
-    if (response.actions && response.actions.length > 0) {
-      broadcastStatus('busy', `Executing ${response.actions.length} action(s)...`);
+      // Build message — first step gets original command, continuations get "Continue"
+      const message = step === 0 ? command : `Continue. ${command}`;
+
+      broadcastStatus('busy', step === 0 ? 'Thinking...' : `Step ${step + 1}: Thinking...`);
+      const response = await aiClient.sendMessage(message, pageContext);
+
+      if (shouldStop) break;
+
+      // Check for empty or describe-only response (model returned prose)
+      const hasRealActions = response.actions?.some(a => a.type !== 'describe');
+      if (!response.actions || response.actions.length === 0 || !hasRealActions) {
+        if (response.summary) broadcastLog('info', response.summary);
+        break;
+      }
+
+      // Execute actions
+      broadcastStatus('busy', step === 0
+        ? `Executing ${response.actions.length} action(s)...`
+        : `Step ${step + 1}: Executing ${response.actions.length} action(s)...`);
       broadcastLog('info', response.thinking || 'Planning actions...');
 
       for (let i = 0; i < response.actions.length; i++) {
-        if (shouldStop) {
-          broadcastLog('info', 'Stopped by user');
-          break;
-        }
+        if (shouldStop) break;
 
         const action = response.actions[i];
         broadcastLog('pending', `[${i + 1}/${response.actions.length}] ${action.type}: ${action.description || action.selector || action.url || ''}`);
@@ -152,28 +164,36 @@ async function handleExecuteCommand(command) {
           const result = await executeAction(action, tab);
           broadcastLog('success', `[${i + 1}/${response.actions.length}] ${action.type}: Done`);
 
-          if (result && result.data) {
+          if (result?.data) {
             broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 200)}`);
           }
-          if (result && result.text) {
+          if (result?.text) {
             broadcastLog('info', result.text.substring(0, 500));
           }
-          if (result && result.result) {
+          if (result?.result) {
             broadcastLog('info', `Result: ${result.result.substring(0, 500)}`);
           }
         } catch (err) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
       }
+
+      lastSummary = response.summary || 'Actions completed.';
+
+      // Check if AI says the task is done
+      if (response.done === true || response.done === 'true') {
+        broadcastLog('info', `Complete: ${lastSummary}`);
+        break;
+      }
+
+      // Brief pause before next iteration to let page settle
+      await new Promise(r => setTimeout(r, 800));
     }
 
     broadcastStatus('ready', 'Ready');
     broadcastExecutionState(false);
 
-    return {
-      result: response.summary || 'Actions completed.',
-      thinking: response.thinking
-    };
+    return { result: lastSummary || 'Actions completed.' };
   } catch (err) {
     broadcastStatus('error', 'Error');
     broadcastExecutionState(false);
