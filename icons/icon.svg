@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4285F4"/>
+      <stop offset="100%" style="stop-color:#1a73e8"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  <!-- Browser window icon -->
+  <rect x="28" y="32" width="72" height="56" rx="6" fill="none" stroke="white" stroke-width="4"/>
+  <line x1="28" y1="46" x2="100" y2="46" stroke="white" stroke-width="4"/>
+  <!-- Window dots -->
+  <circle cx="38" cy="39" r="3" fill="white"/>
+  <circle cx="48" cy="39" r="3" fill="white"/>
+  <circle cx="58" cy="39" r="3" fill="white"/>
+  <!-- Gemini sparkle -->
+  <path d="M72 62 L76 54 L80 62 L88 66 L80 70 L76 78 L72 70 L64 66 Z" fill="white" opacity="0.9"/>
+  <!-- Cursor -->
+  <path d="M44 58 L44 76 L50 71 L56 80 L60 78 L54 69 L61 67 Z" fill="white" opacity="0.9"/>
+</svg>

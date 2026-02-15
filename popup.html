@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Browser Controller</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="#4285F4" stroke-width="2"/>
+          <path d="M12 6v12M6 12h12" stroke="#4285F4" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <h1>Gemini Controller</h1>
+      </div>
+      <button id="open-sidepanel" title="Open Side Panel">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <rect x="1" y="1" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/>
+          <line x1="11" y1="1" x2="11" y2="17" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- API Key Setup -->
+    <section id="setup-section">
+      <p class="setup-desc">Enter your Google Gemini API key to get started.</p>
+      <div class="input-group">
+        <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
+        <button id="save-key-btn">Save</button>
+      </div>
+      <p class="hint">Get a key at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a></p>
+      <div id="key-error" class="error hidden"></div>
+    </section>
+
+    <!-- Main Control Panel -->
+    <section id="control-section" class="hidden">
+      <div class="status-bar">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Ready</span>
+        <button id="change-key-btn" class="text-btn">Change Key</button>
+      </div>
+
+      <!-- Quick Actions -->
+      <div class="quick-actions">
+        <button class="action-btn" data-action="screenshot">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/></svg>
+          Screenshot
+        </button>
+        <button class="action-btn" data-action="inspect">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4" stroke="currentColor" stroke-width="1.2"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.2"/></svg>
+          Inspect
+        </button>
+        <button class="action-btn" data-action="tabgroup">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1" y="2" width="5" height="4" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="2" width="7" height="4" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="8" width="14" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
+          Tab Groups
+        </button>
+        <button class="action-btn" data-action="stop" id="stop-btn" disabled>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg>
+          Stop
+        </button>
+      </div>
+
+      <!-- Chat Input -->
+      <div class="chat-input-area">
+        <textarea id="command-input" placeholder="Tell Gemini what to do... e.g. 'Click the login button' or 'Fill in the search box with cats'" rows="2"></textarea>
+        <button id="send-btn">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 9l14-7-4 7 4 7L2 9z" fill="currentColor"/></svg>
+        </button>
+      </div>
+
+      <!-- Action Log -->
+      <div class="action-log">
+        <h3>Recent Actions</h3>
+        <ul id="action-log-list">
+          <li class="log-empty">No actions yet. Type a command above.</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

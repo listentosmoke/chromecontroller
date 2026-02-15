@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Controller</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="header-left">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="#4285F4" stroke-width="2"/>
+          <path d="M12 6v12M6 12h12" stroke="#4285F4" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <h1>Gemini Controller</h1>
+      </div>
+      <div class="header-actions">
+        <button id="clear-chat" title="Clear conversation">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M2 4h12M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M3 4l1 9a1 1 0 001 1h6a1 1 0 001-1l1-9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="chat-container">
+      <div id="messages">
+        <div class="message system">
+          <p>Gemini Browser Controller is ready. Type a command to control the browser.</p>
+          <p class="examples">Try:</p>
+          <ul class="examples">
+            <li>"Go to google.com and search for cats"</li>
+            <li>"Click the first search result"</li>
+            <li>"Fill in the email field with test@example.com"</li>
+            <li>"Create a tab group called Research"</li>
+            <li>"Take a screenshot"</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-area">
+      <div class="input-row">
+        <textarea id="chat-input" placeholder="Tell Gemini what to do..." rows="1"></textarea>
+        <button id="send-btn">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 9l14-7-4 7 4 7L2 9z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="input-footer">
+        <span id="status-indicator">
+          <span class="dot ready"></span>
+          <span id="status-label">Ready</span>
+        </span>
+        <button id="stop-btn" class="hidden">Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
