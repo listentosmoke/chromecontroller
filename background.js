@@ -145,7 +145,7 @@ async function handleExecuteCommand(command) {
       // Build message — first step gets original command, continuations remind about remaining work
       let message = step === 0
         ? command
-        : `Continue the task: ${command}\n\nYou just completed step ${step}. Check the Visual Page Map carefully — look inside IFRAME sections for quiz items, questions, or forms that still need to be answered. If you see items remaining, answer them and click Next. Only set done=true when there are truly NO more items left.`;
+        : `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
 
       let response = null;
       let gotActions = false;
@@ -285,6 +285,21 @@ async function getPageContext(tab) {
   // Collect visual maps from ALL frames (top + iframes)
   try {
     context.visualMap = await collectAllFrameVisualMaps(tab.id);
+
+    // If no iframe content captured, retry — iframe may still be loading after navigation
+    if (context.visualMap && !context.visualMap.includes('=== IFRAME CONTENT')) {
+      for (let retry = 0; retry < 3; retry++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ['content.js']
+          });
+        } catch { /* ignore */ }
+        context.visualMap = await collectAllFrameVisualMaps(tab.id);
+        if (context.visualMap.includes('=== IFRAME CONTENT')) break;
+      }
+    }
   } catch {
     // Fall back to top frame only
     try {
@@ -389,7 +404,7 @@ async function executeAction(action, tab) {
 
     case 'snapshot': {
       // Wait for iframes to load after page-changing actions (e.g. clicking Next)
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
 
       // Re-inject content scripts into all frames (new iframes from navigation won't have it)
       try {
@@ -401,29 +416,21 @@ async function executeAction(action, tab) {
 
       let visualMap = await collectAllFrameVisualMaps(tab.id);
 
-      // If page has child iframes but snapshot didn't capture them, wait and retry
+      // Always retry if no iframe content found — during iframe navigation,
+      // frame detection can fail even though the page has iframes
       if (!visualMap.includes('=== IFRAME CONTENT')) {
-        try {
-          const frameCheck = await chrome.scripting.executeScript({
-            target: { tabId: tab.id, allFrames: true },
-            func: () => window !== window.top
-          });
-          const hasChildFrames = frameCheck.some(f => f.result === true);
-          if (hasChildFrames) {
-            for (let retry = 0; retry < 3; retry++) {
-              await new Promise(r => setTimeout(r, 2000));
-              // Re-inject in case iframe just finished loading
-              try {
-                await chrome.scripting.executeScript({
-                  target: { tabId: tab.id, allFrames: true },
-                  files: ['content.js']
-                });
-              } catch { /* ignore */ }
-              visualMap = await collectAllFrameVisualMaps(tab.id);
-              if (visualMap.includes('=== IFRAME CONTENT')) break;
-            }
-          }
-        } catch { /* ignore */ }
+        for (let retry = 0; retry < 4; retry++) {
+          await new Promise(r => setTimeout(r, 2000));
+          // Re-inject content scripts in case iframe just finished loading
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: tab.id, allFrames: true },
+              files: ['content.js']
+            });
+          } catch { /* ignore */ }
+          visualMap = await collectAllFrameVisualMaps(tab.id);
+          if (visualMap.includes('=== IFRAME CONTENT')) break;
+        }
       }
 
       return { success: true, text: visualMap };
