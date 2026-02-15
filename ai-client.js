@@ -24,17 +24,20 @@ screenshot: {"type":"screenshot"}
 describe: {"type":"describe","text":"..."}
 tab_new, tab_close, tab_switch, tab_list
 
-OUTPUT THIS JSON:
-{"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
+YOU MUST OUTPUT THIS EXACT JSON STRUCTURE:
+{"thinking":"your plan","actions":[{"type":"click","selector":"..."}],"done":false,"summary":"what you did"}
+
+The "actions" array is REQUIRED and must contain at least one action.
 
 RULES:
-1. Output ONLY JSON. No markdown, no prose, no essays.
+1. Output ONLY the JSON object above. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
-3. For IFRAME elements, ALWAYS include "frameId":N.
+3. For IFRAME elements, ALWAYS include "frameId":N on each action.
 4. After page-changing clicks, add a snapshot action to see the new state.
-5. For multi-step tasks (e.g. "answer all items"): do the CURRENT step, set "done":false.
+5. For multi-step tasks: do the CURRENT step, set "done":false.
 6. Set "done":true ONLY when the entire task is fully complete.
-7. NEVER answer questions yourself. Your job is to CLICK the correct answer on the page.`;
+7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
+8. Your response MUST have an "actions" array or it will be rejected.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
@@ -344,34 +347,37 @@ export class AIClient {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
     }
 
-    // Try direct parse
+    // Try direct parse — but only accept if it has an actions array
     try {
-      return JSON.parse(cleaned);
-    } catch { /* continue */ }
+      const parsed = JSON.parse(cleaned);
+      if (Array.isArray(parsed.actions)) return parsed;
+      // Valid JSON but no actions array — model answered in prose JSON
+    } catch { /* not valid JSON, continue */ }
 
     // Try to find a JSON object with "actions" in the text
     const jsonMatch = cleaned.match(/\{[\s\S]*"actions"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/);
     if (jsonMatch) {
       try {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (Array.isArray(parsed.actions)) return parsed;
       } catch { /* continue */ }
     }
 
-    // Try to find any JSON object
+    // Try to find any JSON object with actions
     const anyJson = cleaned.match(/\{[\s\S]*\}/);
     if (anyJson) {
       try {
         const parsed = JSON.parse(anyJson[0]);
-        if (parsed.actions) return parsed;
+        if (Array.isArray(parsed.actions)) return parsed;
       } catch { /* continue */ }
     }
 
-    // Fallback: mark as done to prevent infinite retry loops
+    // Fallback: return empty actions so the retry loop can re-prompt
     return {
-      thinking: 'Model returned prose instead of JSON',
-      actions: [{ type: 'describe', text: responseText.substring(0, 500) }],
+      thinking: 'Model returned prose instead of JSON — will retry',
+      actions: [],
       summary: responseText.substring(0, 200),
-      done: true
+      done: false
     };
   }
 }
