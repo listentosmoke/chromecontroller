@@ -224,6 +224,207 @@
     return JSON.stringify(result, null, 2);
   }
 
+  // Build a text-based visual map of the page for non-vision AI models.
+  // Scans all visible elements, records bounding boxes and text, then
+  // produces a screenreader-like spatial index sorted top-to-bottom.
+  function getVisualPageMap() {
+    const entries = [];
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    const vpW = window.innerWidth;
+    const vpH = window.innerHeight;
+
+    const INTERACTIVE_TAGS = new Set([
+      'A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'DETAILS', 'SUMMARY',
+      'LABEL', 'OPTION'
+    ]);
+
+    const SKIP_TAGS = new Set([
+      'SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'PATH', 'META', 'LINK', 'BR', 'HR'
+    ]);
+
+    function getSelector(el) {
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      if (el.className && typeof el.className === 'string') {
+        const classes = el.className.trim().split(/\s+/).filter(c => c.length > 0);
+        for (const cls of classes) {
+          const sel = `.${CSS.escape(cls)}`;
+          try { if (document.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+        }
+      }
+      if (el.getAttribute('aria-label')) {
+        const sel = `[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
+        try { if (document.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+      }
+      if (el.dataset && el.dataset.testid) {
+        return `[data-testid="${CSS.escape(el.dataset.testid)}"]`;
+      }
+      if (el.name) {
+        const sel = `[name="${CSS.escape(el.name)}"]`;
+        try { if (document.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
+      }
+      // nth-child fallback
+      const parts = [];
+      let current = el;
+      while (current && current !== document.body && parts.length < 4) {
+        const tag = current.tagName.toLowerCase();
+        const parent = current.parentElement;
+        if (parent) {
+          const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
+          if (siblings.length > 1) {
+            const idx = siblings.indexOf(current) + 1;
+            parts.unshift(`${tag}:nth-of-type(${idx})`);
+          } else {
+            parts.unshift(tag);
+          }
+        } else {
+          parts.unshift(tag);
+        }
+        current = parent;
+      }
+      return parts.join(' > ');
+    }
+
+    function directText(el) {
+      let text = '';
+      for (const n of el.childNodes) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          text += n.textContent;
+        }
+      }
+      return text.replace(/[\t\n\r]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    }
+
+    // Walk the visible DOM and collect entries
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(el) {
+          if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+          if (el.id === '__ai-highlight' || el.id === '__ai-highlight-label') return NodeFilter.FILTER_REJECT;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    let node;
+    while ((node = walker.nextNode())) {
+      if (entries.length >= 500) break;
+
+      const tag = node.tagName;
+      const rect = node.getBoundingClientRect();
+
+      // Skip zero-size or fully off-screen elements
+      if (rect.width === 0 && rect.height === 0) continue;
+
+      const isInteractive = INTERACTIVE_TAGS.has(tag) ||
+        node.getAttribute('role') === 'button' ||
+        node.getAttribute('role') === 'link' ||
+        node.getAttribute('role') === 'tab' ||
+        node.getAttribute('role') === 'checkbox' ||
+        node.getAttribute('role') === 'radio' ||
+        node.getAttribute('role') === 'option' ||
+        node.getAttribute('role') === 'menuitem' ||
+        node.onclick !== null ||
+        node.getAttribute('tabindex') !== null;
+
+      const text = directText(node);
+
+      // Only record elements that have text content or are interactive
+      if (!text && !isInteractive) continue;
+
+      const entry = {
+        tag: tag.toLowerCase(),
+        selector: getSelector(node),
+        x: Math.round(rect.left + scrollX),
+        y: Math.round(rect.top + scrollY),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height),
+        visible: rect.top < vpH && rect.bottom > 0 && rect.left < vpW && rect.right > 0,
+      };
+
+      if (text) entry.text = text.substring(0, 200);
+      if (isInteractive) entry.interactive = true;
+
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        entry.inputType = node.type || 'text';
+        if (node.value) entry.value = node.value.substring(0, 100);
+        if (node.placeholder) entry.placeholder = node.placeholder;
+        if (tag === 'INPUT' && (node.type === 'checkbox' || node.type === 'radio')) {
+          entry.checked = node.checked;
+        }
+        if (tag === 'SELECT') {
+          entry.options = Array.from(node.options).slice(0, 20).map(o => ({
+            value: o.value,
+            text: o.textContent.trim().substring(0, 80),
+            selected: o.selected
+          }));
+        }
+      }
+
+      if (tag === 'A' && node.href) entry.href = node.href;
+      if (node.getAttribute('aria-label')) entry.ariaLabel = node.getAttribute('aria-label');
+      if (node.disabled) entry.disabled = true;
+
+      entries.push(entry);
+    }
+
+    // Sort by vertical position (top-to-bottom), then left-to-right
+    entries.sort((a, b) => a.y - b.y || a.x - b.x);
+
+    // Build text output grouped into visual rows
+    const lines = [];
+    lines.push(`=== VISUAL PAGE MAP ===`);
+    lines.push(`Viewport: ${vpW}x${vpH} | Scroll: ${Math.round(scrollX)},${Math.round(scrollY)} | Total elements: ${entries.length}`);
+    lines.push('');
+
+    for (const e of entries) {
+      const parts = [];
+
+      // Tag + type info
+      let label = e.tag.toUpperCase();
+      if (e.inputType) label += `[${e.inputType}]`;
+      if (e.interactive) label = `*${label}`;
+
+      parts.push(`[${label}]`);
+
+      // Position
+      parts.push(`@(${e.x},${e.y} ${e.w}x${e.h})`);
+
+      // Visibility marker
+      if (!e.visible) parts.push('[offscreen]');
+
+      // Selector
+      parts.push(`sel="${e.selector}"`);
+
+      // Text content
+      if (e.text) parts.push(`"${e.text}"`);
+
+      // Extra attributes
+      if (e.value) parts.push(`value="${e.value}"`);
+      if (e.placeholder) parts.push(`placeholder="${e.placeholder}"`);
+      if (e.ariaLabel) parts.push(`aria="${e.ariaLabel}"`);
+      if (e.checked !== undefined) parts.push(e.checked ? '[CHECKED]' : '[unchecked]');
+      if (e.disabled) parts.push('[disabled]');
+      if (e.href) parts.push(`href="${e.href}"`);
+
+      // Select options
+      if (e.options) {
+        const optText = e.options.map(o => `${o.selected ? '>' : ' '}${o.value}="${o.text}"`).join(', ');
+        parts.push(`options=[${optText}]`);
+      }
+
+      lines.push(parts.join(' '));
+    }
+
+    return lines.join('\n');
+  }
+
   // Action executors
   async function clickElement(selector) {
     const el = document.querySelector(selector);
@@ -394,9 +595,15 @@
       const context = {
         url: window.location.href,
         title: document.title,
-        dom: getSimplifiedDOM()
+        dom: getSimplifiedDOM(),
+        visualMap: getVisualPageMap()
       };
       sendResponse(context);
+      return;
+    }
+
+    if (msg.type === 'GET_VISUAL_MAP') {
+      sendResponse({ visualMap: getVisualPageMap() });
       return;
     }
 
@@ -446,6 +653,8 @@
         return { success: true };
       case 'describe':
         return { success: true, text: action.text };
+      case 'snapshot':
+        return { success: true, text: getVisualPageMap() };
       default:
         return { success: false, error: `Unknown action type: ${action.type}` };
     }
