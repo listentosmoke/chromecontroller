@@ -156,7 +156,10 @@ async function handleExecuteCommand(command) {
             broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 200)}`);
           }
           if (result && result.text) {
-            broadcastLog('info', result.text.substring(0, 300));
+            broadcastLog('info', result.text.substring(0, 500));
+          }
+          if (result && result.result) {
+            broadcastLog('info', `Result: ${result.result.substring(0, 500)}`);
           }
         } catch (err) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
