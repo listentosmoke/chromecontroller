@@ -56,7 +56,48 @@ h1 {
 
 /* Setup Section */
 #setup-section {
-  padding: 24px 16px;
+  padding: 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8892b0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.field select {
+  padding: 8px 10px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #0f3460;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.field select:focus {
+  border-color: #4285F4;
+}
+.field select optgroup {
+  color: #8892b0;
+  font-style: normal;
+}
+.field select option {
+  background: #0f3460;
+  color: #e0e0e0;
 }
 
 .setup-desc {
@@ -165,6 +206,19 @@ h1 {
 #status-text {
   flex: 1;
   color: #8892b0;
+}
+
+.active-model {
+  font-size: 10px;
+  color: #4285F4;
+  background: rgba(66, 133, 244, 0.1);
+  border: 1px solid rgba(66, 133, 244, 0.3);
+  padding: 2px 8px;
+  border-radius: 10px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .text-btn {

@@ -1,7 +1,7 @@
-// background.js — Service worker: orchestrates Gemini API, debugger, tab groups, and content scripts
-import { GeminiClient } from './gemini-api.js';
+// background.js — Service worker: orchestrates AI client, debugger, tab groups, and content scripts
+import { AIClient } from './ai-client.js';
 
-let geminiClient = null;
+let aiClient = null;
 let isExecuting = false;
 let shouldStop = false;
 let debuggerAttachedTabs = new Set();
@@ -17,7 +17,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case 'VALIDATE_API_KEY':
-      handleValidateKey(msg.apiKey).then(sendResponse);
+      handleValidateKey(msg.provider, msg.apiKey, msg.model).then(sendResponse);
       return true;
 
     case 'EXECUTE_COMMAND':
@@ -31,12 +31,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case 'GET_CONVERSATION_HISTORY':
       sendResponse({
-        history: geminiClient?.conversationHistory || []
+        history: aiClient?.conversationHistory || []
       });
       return;
 
     case 'CLEAR_HISTORY':
-      geminiClient?.clearHistory();
+      aiClient?.clearHistory();
       sendResponse({ success: true });
       return;
 
@@ -47,22 +47,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ── API Key Validation ──
 
-async function handleValidateKey(apiKey) {
-  const client = new GeminiClient(apiKey);
+async function handleValidateKey(provider, apiKey, model) {
+  const client = new AIClient(provider, apiKey, model);
   const result = await client.validateKey();
   if (result.success) {
-    geminiClient = client;
+    aiClient = client;
   }
   return result;
 }
 
-// ── Ensure Gemini Client ──
+// ── Ensure AI Client ──
 
 async function ensureClient() {
-  if (geminiClient) return;
-  const { geminiApiKey } = await chrome.storage.local.get('geminiApiKey');
-  if (geminiApiKey) {
-    geminiClient = new GeminiClient(geminiApiKey);
+  if (aiClient) return;
+  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+  if (saved.aiApiKey) {
+    aiClient = new AIClient(
+      saved.aiProvider || 'gemini',
+      saved.aiApiKey,
+      saved.aiModel
+    );
   } else {
     throw new Error('No API key configured. Open the popup to set one.');
   }
@@ -90,9 +94,9 @@ async function handleExecuteCommand(command) {
     // Gather page context
     const pageContext = await getPageContext(tab);
 
-    // Send to Gemini
+    // Send to AI
     broadcastStatus('busy', 'Thinking...');
-    const response = await geminiClient.sendMessage(command, pageContext);
+    const response = await aiClient.sendMessage(command, pageContext);
 
     if (shouldStop) {
       broadcastStatus('ready', 'Stopped');
@@ -117,7 +121,6 @@ async function handleExecuteCommand(command) {
           const result = await executeAction(action, tab);
           broadcastLog('success', `[${i + 1}/${response.actions.length}] ${action.type}: Done`);
 
-          // If the action returned data, feed it back to the context
           if (result && result.data) {
             broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 200)}`);
           }
@@ -153,13 +156,11 @@ async function getPageContext(tab) {
   const context = { url: tab.url, title: tab.title };
 
   try {
-    // Get simplified DOM from content script
     const domResponse = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PAGE_CONTEXT' });
     if (domResponse) {
       context.dom = domResponse.dom;
     }
   } catch {
-    // Content script might not be injected yet
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -174,7 +175,6 @@ async function getPageContext(tab) {
     }
   }
 
-  // Capture screenshot via debugger
   try {
     context.screenshot = await captureScreenshot(tab.id);
   } catch {
@@ -187,14 +187,7 @@ async function getPageContext(tab) {
 // ── Action Execution ──
 
 async function executeAction(action, tab) {
-  // Re-query active tab for tab-changing actions
-  const getActiveTab = async () => {
-    const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return t;
-  };
-
   switch (action.type) {
-    // Content-script actions: delegate to content.js
     case 'click':
     case 'type':
     case 'hover':
@@ -210,19 +203,15 @@ async function executeAction(action, tab) {
         action
       });
 
-    // Navigation
     case 'navigate':
       await chrome.tabs.update(tab.id, { url: action.url });
-      // Wait for the page to load
       await waitForTabLoad(tab.id);
       return { success: true };
 
-    // Screenshot via debugger
     case 'screenshot':
       const screenshot = await captureScreenshot(tab.id);
       return { success: true, screenshot };
 
-    // Tab management
     case 'tab_new':
       const newTab = await chrome.tabs.create({ url: action.url || 'about:blank' });
       if (action.url) await waitForTabLoad(newTab.id);
@@ -273,16 +262,6 @@ async function attachDebugger(tabId) {
   }
 }
 
-async function detachDebugger(tabId) {
-  if (!debuggerAttachedTabs.has(tabId)) return;
-  try {
-    await chrome.debugger.detach({ tabId });
-  } catch {
-    // Ignore detach errors
-  }
-  debuggerAttachedTabs.delete(tabId);
-}
-
 async function captureScreenshot(tabId) {
   await attachDebugger(tabId);
 
@@ -292,16 +271,9 @@ async function captureScreenshot(tabId) {
     { format: 'png', quality: 80 }
   );
 
-  // Don't detach immediately — keep debugger for reuse
-  return result.data; // base64 encoded PNG
+  return result.data;
 }
 
-async function sendCDPCommand(tabId, method, params = {}) {
-  await attachDebugger(tabId);
-  return await chrome.debugger.sendCommand({ tabId }, method, params);
-}
-
-// Clean up debugger on tab close
 chrome.tabs.onRemoved.addListener((tabId) => {
   debuggerAttachedTabs.delete(tabId);
 });
@@ -378,7 +350,6 @@ function formatTabList(groups, ungrouped) {
 }
 
 async function createTabGroup(name, color = 'blue', tabIds = []) {
-  // If no tabIds specified, use the active tab
   if (!tabIds || tabIds.length === 0) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     tabIds = [tab.id];
@@ -404,7 +375,6 @@ async function addTabsToGroup(groupId, tabIds) {
 }
 
 async function removeTabGroup(groupId) {
-  // Ungroup all tabs in the group first
   const tabs = await chrome.tabs.query({ groupId });
   if (tabs.length > 0) {
     await chrome.tabs.ungroup(tabs.map(t => t.id));
@@ -415,17 +385,16 @@ async function removeTabGroup(groupId) {
 // ── Utilities ──
 
 function waitForTabLoad(tabId, timeout = 15000) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const timer = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve(); // resolve anyway after timeout
+      resolve();
     }, timeout);
 
     const listener = (updatedTabId, changeInfo) => {
       if (updatedTabId === tabId && changeInfo.status === 'complete') {
         clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(listener);
-        // Small extra delay for page scripts to initialize
         setTimeout(resolve, 500);
       }
     };
