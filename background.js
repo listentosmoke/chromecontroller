@@ -12,17 +12,17 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 
   // Migrate from older versions:
-  // 1. Remove legacy key name
-  // 2. Clear stale model if it was hardcoded in a previous version
-  chrome.storage.local.get(['geminiApiKey', 'aiModel']).then(saved => {
+  // 1. Remove legacy key names
+  // 2. Clear stale Gemini models/provider from previous versions
+  chrome.storage.local.get(['geminiApiKey', 'aiModel', 'aiProvider']).then(saved => {
     const removals = ['geminiApiKey'];
-    // These models were hardcoded before and may not exist on user's account
-    const staleModels = [
-      'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro',
-      'gemini-2.0-flash-lite', 'gemini-2.0-flash'
-    ];
-    if (saved.aiModel && staleModels.includes(saved.aiModel)) {
+    // Clear stale Gemini models that no longer apply
+    if (saved.aiModel && saved.aiModel.startsWith('gemini-')) {
       removals.push('aiModel');
+    }
+    // Clear stale Gemini provider
+    if (saved.aiProvider === 'gemini') {
+      removals.push('aiProvider');
     }
     chrome.storage.local.remove(removals);
   });
@@ -92,11 +92,11 @@ async function ensureClient() {
 
   // Rebuild client if settings changed or client doesn't exist
   if (!aiClient ||
-      aiClient.provider !== (saved.aiProvider || 'gemini') ||
+      aiClient.provider !== (saved.aiProvider || 'groq') ||
       aiClient.model !== saved.aiModel ||
       aiClient.apiKey !== saved.aiApiKey) {
     aiClient = new AIClient(
-      saved.aiProvider || 'gemini',
+      saved.aiProvider || 'groq',
       saved.aiApiKey,
       saved.aiModel
     );

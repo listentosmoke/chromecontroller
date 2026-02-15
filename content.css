@@ -1,9 +1,9 @@
-/* Gemini Controller content styles — injected into pages */
+/* AI Controller content styles — injected into pages */
 
 /* Highlight overlay is created dynamically in content.js */
 
 /* Action indicator shown at top of page during execution */
-#__gemini-action-indicator {
+#__ai-action-indicator {
   position: fixed;
   top: 0;
   left: 0;
@@ -11,12 +11,12 @@
   height: 3px;
   background: linear-gradient(90deg, #4285F4, #34a853, #fbbc04, #ea4335);
   background-size: 300% 100%;
-  animation: __gemini-progress 2s linear infinite;
+  animation: __ai-progress 2s linear infinite;
   z-index: 2147483646;
   pointer-events: none;
 }
 
-@keyframes __gemini-progress {
+@keyframes __ai-progress {
   0% { background-position: 0% 0%; }
   100% { background-position: 300% 0%; }
 }

@@ -1,4 +1,4 @@
-// ai-client.js — Unified AI client supporting Gemini and OpenRouter
+// ai-client.js — Unified AI client supporting Groq and OpenRouter
 
 const SYSTEM_PROMPT = `You are a browser automation assistant. You control a Chrome browser by issuing structured action commands. You can see the page DOM and screenshots.
 
@@ -82,12 +82,12 @@ RULES:
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
 export const PROVIDERS = {
-  gemini: {
-    name: 'Google Gemini',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    keyPlaceholder: 'AIza...',
-    keyHelp: 'https://aistudio.google.com/apikey',
-    keyHelpText: 'aistudio.google.com',
+  groq: {
+    name: 'Groq',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    keyPlaceholder: 'gsk_...',
+    keyHelp: 'https://console.groq.com/keys',
+    keyHelpText: 'console.groq.com/keys',
   },
   openrouter: {
     name: 'OpenRouter',
@@ -101,17 +101,20 @@ export const PROVIDERS = {
 // ── Dynamic model fetching ──
 
 export async function fetchModels(provider, apiKey) {
-  if (provider === 'gemini') {
-    return await _fetchGeminiModels(apiKey);
+  if (provider === 'groq') {
+    return await _fetchGroqModels(apiKey);
   } else if (provider === 'openrouter') {
     return await _fetchOpenRouterModels(apiKey);
   }
   throw new Error('Unknown provider: ' + provider);
 }
 
-async function _fetchGeminiModels(apiKey) {
+async function _fetchGroqModels(apiKey) {
   const response = await fetch(
-    `${PROVIDERS.gemini.baseUrl}/models?key=${apiKey}`
+    `${PROVIDERS.groq.baseUrl}/models`,
+    {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    }
   );
   if (!response.ok) {
     const err = await response.json();
@@ -121,25 +124,17 @@ async function _fetchGeminiModels(apiKey) {
   const data = await response.json();
   const models = [];
 
-  for (const m of (data.models || [])) {
-    // Only include models that support generateContent
-    const methods = m.supportedGenerationMethods || [];
-    if (!methods.includes('generateContent')) continue;
-
-    // Model name is like "models/gemini-2.0-flash" — extract the ID
-    const id = m.name.replace('models/', '');
-    const displayName = m.displayName || id;
+  for (const m of (data.data || [])) {
+    // Only include chat models (skip whisper, tts, etc.)
+    if (m.id.includes('whisper') || m.id.includes('tts') || m.id.includes('distil')) continue;
 
     models.push({
-      id,
-      name: displayName,
-      description: m.description || '',
-      inputTokenLimit: m.inputTokenLimit,
-      outputTokenLimit: m.outputTokenLimit,
+      id: m.id,
+      name: m.id,
+      contextWindow: m.context_window,
     });
   }
 
-  // Sort: shorter names / newer versions first for readability
   models.sort((a, b) => a.id.localeCompare(b.id));
 
   return models;
@@ -191,8 +186,8 @@ export class AIClient {
 
   async validateKey() {
     try {
-      if (this.provider === 'gemini') {
-        return await this._validateGeminiKey();
+      if (this.provider === 'groq') {
+        return await this._validateGroqKey();
       } else if (this.provider === 'openrouter') {
         return await this._validateOpenRouterKey();
       }
@@ -203,8 +198,8 @@ export class AIClient {
   }
 
   async sendMessage(userMessage, pageContext = null) {
-    if (this.provider === 'gemini') {
-      return await this._sendGemini(userMessage, pageContext);
+    if (this.provider === 'groq') {
+      return await this._sendGroq(userMessage, pageContext);
     } else if (this.provider === 'openrouter') {
       return await this._sendOpenRouter(userMessage, pageContext);
     }
@@ -215,12 +210,14 @@ export class AIClient {
     this.conversationHistory = [];
   }
 
-  // ── Gemini Implementation ──
+  // ── Groq Implementation ──
 
-  async _validateGeminiKey() {
-    const response = await fetch(
-      `${PROVIDERS.gemini.baseUrl}/models?key=${this.apiKey}`
-    );
+  async _validateGroqKey() {
+    const response = await fetch(`${PROVIDERS.groq.baseUrl}/models`, {
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+      }
+    });
     if (!response.ok) {
       const err = await response.json();
       throw new Error(err.error?.message || 'Invalid API key');
@@ -228,80 +225,60 @@ export class AIClient {
     return { success: true };
   }
 
-  async _sendGemini(userMessage, pageContext) {
-    const contents = [];
+  async _sendGroq(userMessage, pageContext) {
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT + '\n\nIMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no code fences, no explanation outside the JSON.' }
+    ];
 
     for (const entry of this.conversationHistory) {
-      contents.push(entry);
+      messages.push(entry);
     }
 
-    const parts = [];
-
+    let textContent = userMessage;
     if (pageContext) {
-      let contextText = `\n\n[Current Page Context]\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
+      textContent += `\n\n[Current Page Context]\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.dom) {
-        contextText += `\nSimplified DOM:\n${pageContext.dom}\n`;
+        textContent += `\nSimplified DOM:\n${pageContext.dom}\n`;
       }
-      parts.push({ text: userMessage + contextText });
-
-      if (pageContext.screenshot) {
-        parts.push({
-          inline_data: {
-            mime_type: 'image/png',
-            data: pageContext.screenshot
-          }
-        });
-      }
-    } else {
-      parts.push({ text: userMessage });
     }
 
-    contents.push({ role: 'user', parts });
+    messages.push({ role: 'user', content: textContent });
 
     const requestBody = {
-      contents,
-      systemInstruction: {
-        parts: [{ text: SYSTEM_PROMPT }]
-      },
-      generationConfig: {
-        temperature: 0.2,
-        topP: 0.8,
-        topK: 40,
-        maxOutputTokens: 4096,
-        responseMimeType: 'application/json'
-      }
+      model: this.model,
+      messages,
+      temperature: 0.2,
+      max_tokens: 4096,
+      response_format: { type: 'json_object' },
     };
 
-    const response = await fetch(
-      `${PROVIDERS.gemini.baseUrl}/models/${this.model}:generateContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      }
-    );
+    const response = await fetch(`${PROVIDERS.groq.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(requestBody)
+    });
 
     if (!response.ok) {
       const err = await response.json();
-      const msg = err.error?.message || `Gemini API error: ${response.status}`;
-      // Detect stale/invalid model and give actionable error
-      if (msg.includes('is not found') || msg.includes('not supported')) {
+      const msg = err.error?.message || `Groq API error: ${response.status}`;
+      if (msg.includes('does not exist') || msg.includes('not found')) {
         throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
       }
       throw new Error(msg);
     }
 
     const data = await response.json();
-    const candidate = data.candidates?.[0];
+    const responseText = data.choices?.[0]?.message?.content;
 
-    if (!candidate || !candidate.content?.parts?.[0]?.text) {
-      throw new Error('No response from Gemini');
+    if (!responseText) {
+      throw new Error('No response from Groq');
     }
 
-    const responseText = candidate.content.parts[0].text;
-
-    this.conversationHistory.push({ role: 'user', parts: [{ text: userMessage }] });
-    this.conversationHistory.push({ role: 'model', parts: [{ text: responseText }] });
+    this.conversationHistory.push({ role: 'user', content: userMessage });
+    this.conversationHistory.push({ role: 'assistant', content: responseText });
     this._trimHistory();
 
     return this._parseResponse(responseText);
@@ -365,8 +342,8 @@ export class AIClient {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'chrome-extension://gemini-browser-controller',
-        'X-Title': 'Gemini Browser Controller',
+        'HTTP-Referer': 'chrome-extension://ai-browser-controller',
+        'X-Title': 'AI Browser Controller',
       },
       body: JSON.stringify(requestBody)
     });
