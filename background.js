@@ -604,13 +604,24 @@ async function executeAction(action, tab, mode = 'normal') {
     case 'evaluate':
     case 'keyboard':
     case 'select':
-    case 'drag':
     case 'wait':
     case 'describe':
       return await chrome.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_ACTION',
         action
       }, sendOpts);
+
+    case 'drag':
+      // Use CDP for trusted mouse events (synthetic events are ignored by most frameworks)
+      try {
+        return await executeDragViaCDP(action, tab, sendOpts);
+      } catch (cdpErr) {
+        // Fallback to content script synthetic events
+        broadcastLog('info', `CDP drag failed (${cdpErr.message}), falling back to synthetic events`);
+        return await chrome.tabs.sendMessage(tab.id, {
+          type: 'EXECUTE_ACTION', action
+        }, sendOpts);
+      }
 
     case 'snapshot': {
       if (mode === 'quiz') {
@@ -694,6 +705,107 @@ async function executeAction(action, tab, mode = 'normal') {
 
     default:
       throw new Error(`Unknown action type: ${action.type}`);
+  }
+}
+
+// ── CDP-Based Drag and Drop ──
+
+async function executeDragViaCDP(action, tab, sendOpts) {
+  const fromSelector = action.fromSelector || action.selector;
+  const toSelector = action.toSelector;
+
+  // Get element coordinates from the content script in the correct frame
+  const coords = await chrome.tabs.sendMessage(tab.id, {
+    type: 'EXECUTE_ACTION',
+    action: { type: 'getDragCoords', fromSelector, toSelector }
+  }, sendOpts);
+
+  if (!coords?.success) {
+    throw new Error(coords?.error || 'Could not get drag element coordinates');
+  }
+
+  let { fromX, fromY, toX, toY, fromText, toText } = coords;
+
+  // If targeting an iframe, offset coords by the iframe's position in the page
+  const frameId = action.frameId;
+  if (frameId !== undefined && frameId !== null && frameId !== 0) {
+    const offset = await getIframeOffset(tab.id);
+    if (offset) {
+      fromX += offset.left;
+      fromY += offset.top;
+      toX += offset.left;
+      toY += offset.top;
+    }
+  }
+
+  // Highlight the source element for visual feedback
+  try {
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'HIGHLIGHT', selector: fromSelector, label: 'dragging'
+    }, sendOpts);
+  } catch { /* ignore */ }
+
+  // Use CDP for trusted mouse events (event.isTrusted = true)
+  await attachDebugger(tab.id);
+
+  // Press on source
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: Math.round(fromX), y: Math.round(fromY),
+    button: 'left', clickCount: 1
+  });
+  await new Promise(r => setTimeout(r, 200));
+
+  // Move smoothly to target in steps
+  const steps = 15;
+  for (let i = 1; i <= steps; i++) {
+    const x = fromX + (toX - fromX) * (i / steps);
+    const y = fromY + (toY - fromY) * (i / steps);
+    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: Math.round(x), y: Math.round(y),
+      button: 'left'
+    });
+    await new Promise(r => setTimeout(r, 40));
+  }
+
+  await new Promise(r => setTimeout(r, 100));
+
+  // Release on target
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: Math.round(toX), y: Math.round(toY),
+    button: 'left', clickCount: 1
+  });
+
+  await new Promise(r => setTimeout(r, 300));
+
+  // Hide highlight
+  try {
+    await chrome.tabs.sendMessage(tab.id, { type: 'HIDE_HIGHLIGHT' }, sendOpts);
+  } catch { /* ignore */ }
+
+  return { success: true, text: `Dragged "${fromText}" → "${toText}"` };
+}
+
+async function getIframeOffset(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: () => {
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+          const rect = iframe.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 100) {
+            return { top: rect.top, left: rect.left };
+          }
+        }
+        return null;
+      }
+    });
+    return results?.[0]?.result || null;
+  } catch {
+    return null;
   }
 }
 
