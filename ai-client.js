@@ -33,9 +33,9 @@ RULES:
 1. Output ONLY the JSON object above. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
 3. For IFRAME elements, ALWAYS include "frameId":N on each action.
-4. After page-changing clicks, add a snapshot action to see the new state.
-5. For multi-step tasks: do the CURRENT step, set "done":false.
-6. Set "done":true ONLY when the entire task is fully complete.
+4. ONE ITEM PER RESPONSE: Handle only the CURRENT visible item. Click the answer, click Next, then add a snapshot. Do NOT try to answer multiple items in one response.
+5. For multi-step tasks: set "done":false after each item. The system will re-scan the page for you.
+6. Set "done":true ONLY when there are NO more items/questions remaining.
 7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
 8. Your response MUST have an "actions" array or it will be rejected.
 9. BEFORE clicking Next: ALWAYS select an answer first. Read the question, read ALL options, pick the correct one, click it. NEVER click Next without answering.

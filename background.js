@@ -201,12 +201,14 @@ async function handleExecuteCommand(command) {
         continue;
       }
 
-      // Execute actions
+      // Execute actions — stop at snapshot/screenshot boundaries so the model
+      // can see updated page state before deciding what to do next
       broadcastStatus('busy', step === 0
         ? `Executing ${response.actions.length} action(s)...`
         : `Step ${step + 1}: Executing ${response.actions.length} action(s)...`);
       broadcastLog('info', response.thinking || 'Planning actions...');
 
+      let hitSnapshot = false;
       for (let i = 0; i < response.actions.length; i++) {
         if (shouldStop) break;
 
@@ -218,10 +220,11 @@ async function handleExecuteCommand(command) {
           broadcastLog('success', `[${i + 1}/${response.actions.length}] ${action.type}: Done`);
 
           if (result?.data) {
-            broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 200)}`);
+            broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 500)}`);
           }
           if (result?.text) {
-            broadcastLog('info', result.text.substring(0, 500));
+            // Show enough of visual map to include iframe content
+            broadcastLog('info', result.text.substring(0, 2000));
           }
           if (result?.result) {
             broadcastLog('info', `Result: ${result.result.substring(0, 500)}`);
@@ -229,12 +232,24 @@ async function handleExecuteCommand(command) {
         } catch (err) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
+
+        // After a snapshot/screenshot, stop executing remaining actions.
+        // The next loop iteration will re-scan the page and the model will
+        // see the updated state before deciding what to do next.
+        if (action.type === 'snapshot' || action.type === 'screenshot') {
+          if (i < response.actions.length - 1) {
+            broadcastLog('info', `Pausing after ${action.type} to re-evaluate page state (${response.actions.length - i - 1} remaining actions deferred)`);
+          }
+          hitSnapshot = true;
+          break;
+        }
       }
 
       lastSummary = response.summary || 'Actions completed.';
 
-      // Check if AI says the task is done
-      if (response.done === true || response.done === 'true') {
+      // Check if AI says the task is done — but NOT if we broke at a snapshot
+      // (model planned done=true assuming all actions would execute, but we stopped early)
+      if (!hitSnapshot && (response.done === true || response.done === 'true')) {
         broadcastLog('info', `Complete: ${lastSummary}`);
         break;
       }
