@@ -9,9 +9,10 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, tab_new, tab_close, tab_switch, tab_list
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, tab_new, tab_close, tab_switch, tab_list
 Format: {"type":"click","selector":"sel","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
+drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -23,7 +24,8 @@ RULES:
 3. For IFRAME elements, include "frameId":N on each action.
 4. After page-changing actions, add a snapshot to see the new state.
 5. Set "done":true when the task is complete.
-6. "actions" array is REQUIRED.`;
+6. "actions" array is REQUIRED.
+7. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
@@ -34,8 +36,9 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag
 Format: {"type":"click","selector":"sel","frameId":N}
+drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -51,7 +54,10 @@ QUIZ RULES:
 7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
 8. BEFORE clicking Next: Read the question, read ALL options, click the CORRECT one. NEVER click Next without answering.
 9. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option.
-10. If a modal says items are unanswered, click Cancel, then answer the current item.`;
+10. If a modal says items are unanswered, click Cancel, then answer the current item.
+11. MULTI-ANSWER QUESTIONS: If inputs are CHECKBOXES (not radio buttons), the question may require MULTIPLE correct answers. Check ONLY the correct options and leave wrong ones unchecked. If a wrong option is [CHECKED], click it to uncheck it.
+12. SINGLE-ANSWER QUESTIONS: If inputs are RADIO buttons, select exactly ONE correct answer. Clicking a new radio automatically deselects the old one.
+13. Elements marked [draggable] can be dragged to targets. Use the drag action with fromSelector and toSelector.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 

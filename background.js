@@ -103,6 +103,39 @@ async function ensureClient() {
   }
 }
 
+// ── Quiz Auto-Detection ──
+
+function detectQuizMode(pageContext) {
+  const map = pageContext.visualMap || '';
+  const url = pageContext.url || '';
+  const title = pageContext.title || '';
+
+  const indicators = [
+    { pattern: 'lrn_assess', weight: 3 },       // Learnosity assessment framework
+    { pattern: 'mcq-input', weight: 3 },          // Multiple choice question inputs
+    { pattern: '[radio]', weight: 1 },             // Radio buttons
+    { pattern: '[checkbox]', weight: 1 },          // Checkboxes
+    { pattern: 'Quick Check', weight: 2 },         // Common quiz title
+    { pattern: 'Item ', weight: 1 },               // "Item 1 of 5" text
+    { pattern: 'question', weight: 1 },            // Question-related text
+    { pattern: '[unchecked]', weight: 1 },         // Unchecked options (multiple = quiz)
+  ];
+
+  let score = 0;
+  for (const { pattern, weight } of indicators) {
+    if (map.includes(pattern)) score += weight;
+  }
+
+  // Also check URL/title for quiz-related keywords
+  const lowerUrl = url.toLowerCase();
+  const lowerTitle = title.toLowerCase();
+  for (const keyword of ['quiz', 'assessment', 'test', 'exam', 'survey']) {
+    if (lowerUrl.includes(keyword) || lowerTitle.includes(keyword)) score += 2;
+  }
+
+  return score >= 4;
+}
+
 // ── Command Execution Pipeline ──
 
 async function handleExecuteCommand(command) {
@@ -148,12 +181,18 @@ async function handleExecuteCommand(command) {
       broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
       const pageContext = await getPageContext(tab, executionMode);
 
+      // Auto-detect quiz mode from page content on first step
+      if (step === 0 && executionMode === 'normal' && detectQuizMode(pageContext)) {
+        executionMode = 'quiz';
+        broadcastLog('info', 'Auto-detected quiz/assessment — switched to quiz mode');
+      }
+
       // Build message — mode-specific continuation prompts
       let message;
       if (step === 0) {
         message = command;
-      } else if (isQuiz) {
-        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
+      } else if (executionMode === 'quiz') {
+        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer(s). For single-answer (radio buttons): click the one correct option. For multi-answer (checkboxes): click ONLY the correct options, uncheck wrong ones. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
       } else {
         message = `Continue: ${command}`;
       }
@@ -205,10 +244,17 @@ async function handleExecuteCommand(command) {
       }
 
       // Check for mode switch from AI
-      if (response.mode === 'quiz' || response.mode === 'normal') {
-        if (response.mode !== executionMode) {
-          executionMode = response.mode;
-          broadcastLog('info', `Switched to ${executionMode} mode`);
+      if (response.mode === 'quiz' && executionMode !== 'quiz') {
+        executionMode = 'quiz';
+        broadcastLog('info', 'Switched to quiz mode');
+      }
+      // Only allow exit from quiz mode when AI also says done=true
+      // This prevents premature switching back to normal mid-quiz
+      if (response.mode === 'normal' && executionMode === 'quiz') {
+        const isDone = response.done === true || response.done === 'true';
+        if (isDone) {
+          executionMode = 'normal';
+          broadcastLog('info', 'Quiz complete — switched back to normal mode');
         }
       }
 
@@ -420,6 +466,7 @@ async function executeAction(action, tab, mode = 'normal') {
     case 'evaluate':
     case 'keyboard':
     case 'select':
+    case 'drag':
     case 'wait':
     case 'describe':
       return await chrome.tabs.sendMessage(tab.id, {
