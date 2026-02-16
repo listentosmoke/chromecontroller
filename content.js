@@ -322,6 +322,8 @@
       // Skip zero-size or fully off-screen elements
       if (rect.width === 0 && rect.height === 0) continue;
 
+      const isDraggable = node.draggable === true || node.getAttribute('draggable') === 'true';
+
       const isInteractive = INTERACTIVE_TAGS.has(tag) ||
         node.getAttribute('role') === 'button' ||
         node.getAttribute('role') === 'link' ||
@@ -331,7 +333,8 @@
         node.getAttribute('role') === 'option' ||
         node.getAttribute('role') === 'menuitem' ||
         node.onclick !== null ||
-        node.getAttribute('tabindex') !== null;
+        node.getAttribute('tabindex') !== null ||
+        isDraggable;
 
       const text = directText(node);
 
@@ -370,6 +373,13 @@
       if (tag === 'A' && node.href) entry.href = node.href;
       if (node.getAttribute('aria-label')) entry.ariaLabel = node.getAttribute('aria-label');
       if (node.disabled) entry.disabled = true;
+      if (isDraggable) entry.draggable = true;
+      // Mark drop targets (elements with ondragover/ondrop or role=list/group that accept drops)
+      if (node.ondragover !== null || node.ondrop !== null ||
+          node.getAttribute('dropzone') || node.classList.contains('drop-target') ||
+          node.classList.contains('dropzone') || node.classList.contains('droppable')) {
+        entry.droptarget = true;
+      }
 
       entries.push(entry);
     }
@@ -410,6 +420,8 @@
       if (e.placeholder) parts.push(`placeholder="${e.placeholder}"`);
       if (e.ariaLabel) parts.push(`aria="${e.ariaLabel}"`);
       if (e.checked !== undefined) parts.push(e.checked ? '[CHECKED]' : '[unchecked]');
+      if (e.draggable) parts.push('[draggable]');
+      if (e.droptarget) parts.push('[droptarget]');
       if (e.disabled) parts.push('[disabled]');
       if (e.href) parts.push(`href="${e.href}"`);
 
@@ -574,6 +586,54 @@
     return { success: true };
   }
 
+  async function dragElement(fromSelector, toSelector) {
+    const from = document.querySelector(fromSelector);
+    const to = document.querySelector(toSelector);
+    if (!from) throw new Error(`Source element not found: ${fromSelector}`);
+    if (!to) throw new Error(`Target element not found: ${toSelector}`);
+
+    highlightElement(fromSelector, 'dragging');
+
+    from.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(300);
+
+    const fromRect = from.getBoundingClientRect();
+    const toRect = to.getBoundingClientRect();
+    const fromX = fromRect.left + fromRect.width / 2;
+    const fromY = fromRect.top + fromRect.height / 2;
+    const toX = toRect.left + toRect.width / 2;
+    const toY = toRect.top + toRect.height / 2;
+
+    const dataTransfer = new DataTransfer();
+
+    from.dispatchEvent(new DragEvent('dragstart', {
+      bubbles: true, cancelable: true, clientX: fromX, clientY: fromY, dataTransfer
+    }));
+
+    await sleep(100);
+
+    to.dispatchEvent(new DragEvent('dragenter', {
+      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
+    }));
+    to.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
+    }));
+
+    await sleep(100);
+
+    to.dispatchEvent(new DragEvent('drop', {
+      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
+    }));
+    from.dispatchEvent(new DragEvent('dragend', {
+      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
+    }));
+
+    await sleep(200);
+    hideHighlight();
+
+    return { success: true };
+  }
+
   async function waitForSelector(selector, timeout = 5000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
@@ -645,6 +705,8 @@
         return pressKey(action.key);
       case 'select':
         return selectOption(action.selector, action.value);
+      case 'drag':
+        return dragElement(action.fromSelector || action.selector, action.toSelector);
       case 'wait':
         if (action.selector) {
           return waitForSelector(action.selector, action.timeout);

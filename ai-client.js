@@ -1,46 +1,63 @@
 // ai-client.js — Unified AI client supporting Groq and OpenRouter
 
-const SYSTEM_PROMPT = `You are a browser automation bot. Output ONLY valid JSON.
+// ── Normal mode: general-purpose browsing automation ──
+const SYSTEM_PROMPT_NORMAL = `You are a browser automation bot. Output ONLY valid JSON.
 
 You see a Visual Page Map of page elements. Each line:
 [*TAG] @(x,y WxH) sel="CSS selector" "text" [state]
-* = interactive | sel = CSS selector for your actions | [CHECKED]/[unchecked] | options=[...]
+* = interactive | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS (use in "actions" array):
-click: {"type":"click","selector":"sel","frameId":N}
-type: {"type":"type","selector":"sel","text":"...","clearFirst":true,"frameId":N}
-select: {"type":"select","selector":"sel","value":"val","frameId":N}
-extract: {"type":"extract","selector":"sel","attribute":"textContent","frameId":N}
-evaluate: {"type":"evaluate","expression":"js code","frameId":N}
-snapshot: {"type":"snapshot"} re-read page after changes
-navigate: {"type":"navigate","url":"..."}
-scroll: {"type":"scroll","direction":"down","amount":300}
-wait: {"type":"wait","milliseconds":1000}
-keyboard: {"type":"keyboard","key":"Enter"}
-hover: {"type":"hover","selector":"sel"}
-screenshot: {"type":"screenshot"}
-describe: {"type":"describe","text":"..."}
-tab_new, tab_close, tab_switch, tab_list
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, tab_new, tab_close, tab_switch, tab_list
+Format: {"type":"click","selector":"sel","frameId":N}
+type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
+drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 
-YOU MUST OUTPUT THIS EXACT JSON STRUCTURE:
-{"thinking":"your plan","actions":[{"type":"click","selector":"..."}],"done":false,"summary":"what you did"}
+OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
-The "actions" array is REQUIRED and must contain at least one action.
+MODE SWITCH: If you detect a quiz, test, assessment, survey, or form with multiple questions to complete, include "mode":"quiz" in your JSON to activate enhanced quiz mode.
 
 RULES:
-1. Output ONLY the JSON object above. No markdown, no prose.
+1. Output ONLY JSON. No markdown, no prose.
+2. Use selectors from the Visual Page Map exactly.
+3. For IFRAME elements, include "frameId":N on each action.
+4. After page-changing actions, add a snapshot to see the new state.
+5. Set "done":true when the task is complete.
+6. "actions" array is REQUIRED.
+7. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.`;
+
+// ── Quiz mode: strict one-question-at-a-time for assessments ──
+const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
+
+You see a Visual Page Map of page elements. Each line:
+[*TAG] @(x,y WxH) sel="CSS selector" "text" [state]
+* = interactive | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
+
+Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
+
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag
+Format: {"type":"click","selector":"sel","frameId":N}
+drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
+
+OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
+
+Include "mode":"normal" to exit quiz mode when the quiz/assessment is fully done.
+
+QUIZ RULES:
+1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
 3. For IFRAME elements, ALWAYS include "frameId":N on each action.
-4. ONE ITEM PER RESPONSE: Handle only the CURRENT visible item. Click the answer, click Next, then add a snapshot. Do NOT try to answer multiple items in one response.
-5. For multi-step tasks: set "done":false after each item. The system will re-scan the page for you.
+4. ONE ITEM PER RESPONSE: Handle ONLY the current visible question. Click the correct answer, click Next, then add a snapshot. STOP there.
+5. Set "done":false after each item. The system re-scans the page automatically.
 6. Set "done":true ONLY when there are NO more items/questions remaining.
 7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
-8. Your response MUST have an "actions" array or it will be rejected.
-9. BEFORE clicking Next: ALWAYS select an answer first. Read the question, read ALL options, pick the correct one, click it. NEVER click Next without answering.
-10. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option to change it.
-11. If a modal/dialog says items are unanswered, click Cancel/Go Back, then answer the current item.`;
+8. BEFORE clicking Next: Read the question, read ALL options, click the CORRECT one. NEVER click Next without answering.
+9. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option.
+10. If a modal says items are unanswered, click Cancel, then answer the current item.
+11. MULTI-ANSWER QUESTIONS: If inputs are CHECKBOXES (not radio buttons), the question may require MULTIPLE correct answers. Check ONLY the correct options and leave wrong ones unchecked. If a wrong option is [CHECKED], click it to uncheck it.
+12. SINGLE-ANSWER QUESTIONS: If inputs are RADIO buttons, select exactly ONE correct answer. Clicking a new radio automatically deselects the old one.
+13. Elements marked [draggable] can be dragged to targets. Use the drag action with fromSelector and toSelector.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
@@ -160,11 +177,11 @@ export class AIClient {
     }
   }
 
-  async sendMessage(userMessage, pageContext = null) {
+  async sendMessage(userMessage, pageContext = null, mode = 'normal') {
     if (this.provider === 'groq') {
-      return await this._sendGroq(userMessage, pageContext);
+      return await this._sendGroq(userMessage, pageContext, mode);
     } else if (this.provider === 'openrouter') {
-      return await this._sendOpenRouter(userMessage, pageContext);
+      return await this._sendOpenRouter(userMessage, pageContext, mode);
     }
     throw new Error('Unknown provider: ' + this.provider);
   }
@@ -188,9 +205,10 @@ export class AIClient {
     return { success: true };
   }
 
-  async _sendGroq(userMessage, pageContext) {
+  async _sendGroq(userMessage, pageContext, mode = 'normal') {
+    const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT }
+      { role: 'system', content: systemPrompt }
     ];
 
     // Add recent history only (keep small for small models)
@@ -264,9 +282,10 @@ export class AIClient {
     return { success: true };
   }
 
-  async _sendOpenRouter(userMessage, pageContext) {
+  async _sendOpenRouter(userMessage, pageContext, mode = 'normal') {
+    const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT }
+      { role: 'system', content: systemPrompt }
     ];
 
     const recentHistory = this.conversationHistory.slice(-6);
