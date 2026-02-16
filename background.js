@@ -120,32 +120,43 @@ async function handleExecuteCommand(command) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) throw new Error('No active tab found.');
 
-    const MAX_STEPS = 15;
-    const MAX_RETRIES = 3; // retries per step when model fails to produce actions
+    const MAX_RETRIES = 3;
     let lastSummary = '';
+    let executionMode = 'normal'; // AI can switch to 'quiz' dynamically
 
-    for (let step = 0; step < MAX_STEPS; step++) {
+    const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
+
+    for (let step = 0; step < maxSteps(); step++) {
       if (shouldStop) {
         broadcastLog('info', 'Stopped by user');
         break;
       }
 
-      // Re-inject content scripts (iframes may have navigated between steps)
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: true },
-          files: ['content.js']
-        });
-      } catch { /* restricted page */ }
+      const isQuiz = executionMode === 'quiz';
+
+      // In quiz mode, re-inject content scripts (iframes may have navigated)
+      if (isQuiz) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ['content.js']
+          });
+        } catch { /* restricted page */ }
+      }
 
       // Gather fresh page context each step
       broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
-      const pageContext = await getPageContext(tab);
+      const pageContext = await getPageContext(tab, executionMode);
 
-      // Build message — first step gets original command, continuations remind about remaining work
-      let message = step === 0
-        ? command
-        : `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
+      // Build message — mode-specific continuation prompts
+      let message;
+      if (step === 0) {
+        message = command;
+      } else if (isQuiz) {
+        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
+      } else {
+        message = `Continue: ${command}`;
+      }
 
       let response = null;
       let gotActions = false;
@@ -158,7 +169,7 @@ async function handleExecuteCommand(command) {
           ? 'Thinking...'
           : `Step ${step + 1}${attempt > 0 ? ` (retry ${attempt})` : ''}: Thinking...`);
 
-        response = await aiClient.sendMessage(message, pageContext);
+        response = await aiClient.sendMessage(message, pageContext, executionMode);
 
         if (shouldStop) break;
 
@@ -166,43 +177,42 @@ async function handleExecuteCommand(command) {
         const hasRealActions = response.actions?.some(a => a.type !== 'describe');
         if (response.actions && response.actions.length > 0 && hasRealActions) {
           gotActions = true;
-          break; // Good response, proceed to execute
+          break;
         }
 
         // Model returned no actions or prose — retry with corrective prompt
         if (attempt < MAX_RETRIES - 1) {
           broadcastLog('info', `Model returned no actions (attempt ${attempt + 1}/${MAX_RETRIES}), re-prompting...`);
-
-          // Remove the failed exchange from conversation history so it doesn't reinforce bad behavior
           if (aiClient.conversationHistory.length >= 2) {
             aiClient.conversationHistory.splice(-2, 2);
           }
-
-          // Send corrective prompt that explicitly demands JSON with actions
-          message = `IMPORTANT: You must output JSON with an "actions" array containing click/type/select actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations.\n\nTask: ${command}\n\nLook at the Visual Page Map above. Find the correct answer and output a click action for it.`;
+          message = `IMPORTANT: You must output JSON with an "actions" array containing click/type/select actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations.\n\nTask: ${command}\n\nLook at the Visual Page Map above and output actions.`;
         }
       }
 
       if (shouldStop) break;
 
-      // After all retries, if still no actions, log and continue to next step (don't break the whole loop)
       if (!gotActions) {
         broadcastLog('info', response?.summary || 'Model could not produce actions after retries.');
-        // Remove failed history entries
         if (aiClient.conversationHistory.length >= 2) {
           aiClient.conversationHistory.splice(-2, 2);
         }
-        // On step 0 with no actions at all, we can't continue — break
         if (step === 0) {
           broadcastLog('error', 'Model failed to produce any actions. Try rephrasing the command or using a different model.');
           break;
         }
-        // On later steps, the task may already be partially done — try one more re-scan
         continue;
       }
 
-      // Execute actions — stop at snapshot/screenshot boundaries so the model
-      // can see updated page state before deciding what to do next
+      // Check for mode switch from AI
+      if (response.mode === 'quiz' || response.mode === 'normal') {
+        if (response.mode !== executionMode) {
+          executionMode = response.mode;
+          broadcastLog('info', `Switched to ${executionMode} mode`);
+        }
+      }
+
+      // Execute actions
       broadcastStatus('busy', step === 0
         ? `Executing ${response.actions.length} action(s)...`
         : `Step ${step + 1}: Executing ${response.actions.length} action(s)...`);
@@ -216,14 +226,13 @@ async function handleExecuteCommand(command) {
         broadcastLog('pending', `[${i + 1}/${response.actions.length}] ${action.type}: ${action.description || action.selector || action.url || ''}`);
 
         try {
-          const result = await executeAction(action, tab);
+          const result = await executeAction(action, tab, executionMode);
           broadcastLog('success', `[${i + 1}/${response.actions.length}] ${action.type}: Done`);
 
           if (result?.data) {
             broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 500)}`);
           }
           if (result?.text) {
-            // Show enough of visual map to include iframe content
             broadcastLog('info', result.text.substring(0, 2000));
           }
           if (result?.result) {
@@ -233,10 +242,10 @@ async function handleExecuteCommand(command) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
 
-        // After a snapshot/screenshot, stop executing remaining actions.
-        // The next loop iteration will re-scan the page and the model will
-        // see the updated state before deciding what to do next.
-        if (action.type === 'snapshot' || action.type === 'screenshot') {
+        // In quiz mode: break at snapshot/screenshot boundaries so the model
+        // sees updated page state before deciding next action.
+        // In normal mode: execute all actions in the batch.
+        if (executionMode === 'quiz' && (action.type === 'snapshot' || action.type === 'screenshot')) {
           if (i < response.actions.length - 1) {
             broadcastLog('info', `Pausing after ${action.type} to re-evaluate page state (${response.actions.length - i - 1} remaining actions deferred)`);
           }
@@ -247,16 +256,17 @@ async function handleExecuteCommand(command) {
 
       lastSummary = response.summary || 'Actions completed.';
 
-      // Check if AI says the task is done — but NOT if we broke at a snapshot
-      // (model planned done=true assuming all actions would execute, but we stopped early)
-      if (!hitSnapshot && (response.done === true || response.done === 'true')) {
+      // Check if AI says the task is done
+      // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
+      const isDone = response.done === true || response.done === 'true';
+      if (isDone && !(hitSnapshot && executionMode === 'quiz')) {
         broadcastLog('info', `Complete: ${lastSummary}`);
         break;
       }
 
-      // Longer pause if actions included clicks (page/iframe may need to reload)
+      // Pause between steps — longer in quiz mode after clicks
       const hadClicks = response.actions.some(a => a.type === 'click');
-      const pauseMs = hadClicks ? 2500 : 800;
+      const pauseMs = executionMode === 'quiz' && hadClicks ? 2500 : 800;
       await new Promise(r => setTimeout(r, pauseMs));
     }
 
@@ -276,7 +286,7 @@ async function handleExecuteCommand(command) {
 
 // ── Page Context Gathering ──
 
-async function getPageContext(tab) {
+async function getPageContext(tab, mode = 'normal') {
   const context = { url: tab.url, title: tab.title };
 
   // Ensure content script is injected in ALL frames (including cross-origin iframes)
@@ -301,8 +311,8 @@ async function getPageContext(tab) {
   try {
     context.visualMap = await collectAllFrameVisualMaps(tab.id);
 
-    // If no iframe content captured, retry — iframe may still be loading after navigation
-    if (context.visualMap && !context.visualMap.includes('=== IFRAME CONTENT')) {
+    // In quiz mode: retry if iframe content missing (iframe may still be loading after navigation)
+    if (mode === 'quiz' && context.visualMap && !context.visualMap.includes('=== IFRAME CONTENT')) {
       for (let retry = 0; retry < 3; retry++) {
         await new Promise(r => setTimeout(r, 1500));
         try {
@@ -394,7 +404,7 @@ async function collectAllFrameVisualMaps(tabId) {
 
 // ── Action Execution ──
 
-async function executeAction(action, tab) {
+async function executeAction(action, tab, mode = 'normal') {
   // Route DOM actions to the correct frame
   const sendOpts = {};
   if (action.frameId !== undefined && action.frameId !== null) {
@@ -418,36 +428,41 @@ async function executeAction(action, tab) {
       }, sendOpts);
 
     case 'snapshot': {
-      // Wait for iframes to load after page-changing actions (e.g. clicking Next)
-      await new Promise(r => setTimeout(r, 2000));
+      if (mode === 'quiz') {
+        // Quiz mode: wait for iframes to load after page-changing actions
+        await new Promise(r => setTimeout(r, 2000));
 
-      // Re-inject content scripts into all frames (new iframes from navigation won't have it)
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: true },
-          files: ['content.js']
-        });
-      } catch { /* restricted page */ }
+        // Re-inject content scripts into all frames (new iframes from navigation won't have it)
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ['content.js']
+          });
+        } catch { /* restricted page */ }
 
-      let visualMap = await collectAllFrameVisualMaps(tab.id);
+        let visualMap = await collectAllFrameVisualMaps(tab.id);
 
-      // Always retry if no iframe content found — during iframe navigation,
-      // frame detection can fail even though the page has iframes
-      if (!visualMap.includes('=== IFRAME CONTENT')) {
-        for (let retry = 0; retry < 4; retry++) {
-          await new Promise(r => setTimeout(r, 2000));
-          // Re-inject content scripts in case iframe just finished loading
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: tab.id, allFrames: true },
-              files: ['content.js']
-            });
-          } catch { /* ignore */ }
-          visualMap = await collectAllFrameVisualMaps(tab.id);
-          if (visualMap.includes('=== IFRAME CONTENT')) break;
+        // Retry if no iframe content found — during iframe navigation,
+        // frame detection can fail even though the page has iframes
+        if (!visualMap.includes('=== IFRAME CONTENT')) {
+          for (let retry = 0; retry < 4; retry++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: tab.id, allFrames: true },
+                files: ['content.js']
+              });
+            } catch { /* ignore */ }
+            visualMap = await collectAllFrameVisualMaps(tab.id);
+            if (visualMap.includes('=== IFRAME CONTENT')) break;
+          }
         }
+
+        return { success: true, text: visualMap };
       }
 
+      // Normal mode: quick snapshot, no heavy retries
+      const visualMap = await collectAllFrameVisualMaps(tab.id);
       return { success: true, text: visualMap };
     }
 
