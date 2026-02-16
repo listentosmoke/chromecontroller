@@ -595,7 +595,7 @@
     highlightElement(fromSelector, 'dragging');
 
     from.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await sleep(300);
+    await sleep(400);
 
     const fromRect = from.getBoundingClientRect();
     const toRect = to.getBoundingClientRect();
@@ -603,35 +603,51 @@
     const fromY = fromRect.top + fromRect.height / 2;
     const toX = toRect.left + toRect.width / 2;
     const toY = toRect.top + toRect.height / 2;
+    const evtOpts = { bubbles: true, cancelable: true, view: window };
 
-    const dataTransfer = new DataTransfer();
+    // Phase 1: Mouse + Pointer events (works with jQuery UI, SortableJS, Learnosity, custom libs)
+    from.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, clientX: fromX, clientY: fromY, pointerId: 1 }));
+    from.dispatchEvent(new MouseEvent('mousedown', { ...evtOpts, clientX: fromX, clientY: fromY }));
+    await sleep(150);
 
-    from.dispatchEvent(new DragEvent('dragstart', {
-      bubbles: true, cancelable: true, clientX: fromX, clientY: fromY, dataTransfer
-    }));
+    // Simulate smooth movement in 10 steps
+    const steps = 10;
+    for (let i = 1; i <= steps; i++) {
+      const x = fromX + (toX - fromX) * (i / steps);
+      const y = fromY + (toY - fromY) * (i / steps);
+      document.dispatchEvent(new PointerEvent('pointermove', { ...evtOpts, clientX: x, clientY: y, pointerId: 1 }));
+      document.dispatchEvent(new MouseEvent('mousemove', { ...evtOpts, clientX: x, clientY: y }));
+      await sleep(50);
+    }
 
+    // Fire enter/over on the target
+    to.dispatchEvent(new MouseEvent('mouseenter', { ...evtOpts, clientX: toX, clientY: toY }));
+    to.dispatchEvent(new MouseEvent('mouseover', { ...evtOpts, clientX: toX, clientY: toY }));
     await sleep(100);
 
-    to.dispatchEvent(new DragEvent('dragenter', {
-      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
-    }));
-    to.dispatchEvent(new DragEvent('dragover', {
-      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
-    }));
-
-    await sleep(100);
-
-    to.dispatchEvent(new DragEvent('drop', {
-      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
-    }));
-    from.dispatchEvent(new DragEvent('dragend', {
-      bubbles: true, cancelable: true, clientX: toX, clientY: toY, dataTransfer
-    }));
-
+    // Release
+    to.dispatchEvent(new PointerEvent('pointerup', { ...evtOpts, clientX: toX, clientY: toY, pointerId: 1 }));
+    to.dispatchEvent(new MouseEvent('mouseup', { ...evtOpts, clientX: toX, clientY: toY }));
     await sleep(200);
+
+    // Phase 2: HTML5 DragEvent as secondary (native drag-and-drop support)
+    try {
+      const dataTransfer = new DataTransfer();
+      from.dispatchEvent(new DragEvent('dragstart', { ...evtOpts, clientX: fromX, clientY: fromY, dataTransfer }));
+      await sleep(100);
+      to.dispatchEvent(new DragEvent('dragenter', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+      to.dispatchEvent(new DragEvent('dragover', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+      await sleep(100);
+      to.dispatchEvent(new DragEvent('drop', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+      from.dispatchEvent(new DragEvent('dragend', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+    } catch { /* DragEvent may not be supported in all contexts */ }
+
+    await sleep(400);
     hideHighlight();
 
-    return { success: true };
+    const fromText = from.textContent?.trim().substring(0, 50) || fromSelector;
+    const toText = to.textContent?.trim().substring(0, 50) || toSelector;
+    return { success: true, text: `Dragged "${fromText}" → "${toText}"` };
   }
 
   async function waitForSelector(selector, timeout = 5000) {
