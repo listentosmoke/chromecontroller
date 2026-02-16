@@ -295,7 +295,7 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
       } else if (executionMode === 'quiz') {
-        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: drag ONE item, then snapshot to verify before dragging the next.\n5) Click Next, then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
+        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next, then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
       } else {
         message = `Continue: ${command}`;
       }
@@ -612,7 +612,33 @@ async function executeAction(action, tab, mode = 'normal') {
       }, sendOpts);
 
     case 'drag':
-      // Use CDP for trusted mouse events (synthetic events are ignored by most frameworks)
+      // Quiz mode: use click-click pattern (click source to select, click target to place)
+      // Learnosity's accessibility mode supports this interaction model
+      if (mode === 'quiz') {
+        const fromSel = action.fromSelector || action.selector;
+        const toSel = action.toSelector;
+        broadcastLog('info', `Quiz drag: clicking source "${fromSel}" then target "${toSel}"`);
+
+        // Click the draggable item to select it
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'EXECUTE_ACTION',
+          action: { type: 'click', selector: fromSel, description: 'Select drag item' }
+        }, sendOpts);
+
+        // Brief pause to let the framework register the selection
+        await new Promise(r => setTimeout(r, 500));
+
+        // Click the drop target to place the item
+        const result = await chrome.tabs.sendMessage(tab.id, {
+          type: 'EXECUTE_ACTION',
+          action: { type: 'click', selector: toSel, description: 'Place in drop target' }
+        }, sendOpts);
+
+        const fromText = result?.text || fromSel;
+        return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
+      }
+
+      // Normal mode: use CDP for trusted mouse events (synthetic events are ignored by most frameworks)
       try {
         return await executeDragViaCDP(action, tab, sendOpts);
       } catch (cdpErr) {
