@@ -57,7 +57,8 @@ QUIZ RULES:
 10. If a modal says items are unanswered, click Cancel, then answer the current item.
 11. MULTI-ANSWER QUESTIONS: If inputs are CHECKBOXES (not radio buttons), the question may require MULTIPLE correct answers. Check ONLY the correct options and leave wrong ones unchecked. If a wrong option is [CHECKED], click it to uncheck it.
 12. SINGLE-ANSWER QUESTIONS: If inputs are RADIO buttons, select exactly ONE correct answer. Clicking a new radio automatically deselects the old one.
-13. Elements marked [draggable] can be dragged to targets. Use the drag action with fromSelector and toSelector.`;
+13. Elements marked [draggable] can be dragged to targets. Use the drag action with fromSelector and toSelector.
+14. DIFF SNAPSHOTS: After step 1, you receive a PAGE UPDATE (diff) instead of the full map. Only changed sections are shown. Unchanged outer page elements still exist with previous selectors — use them normally (e.g. the Next button). The "Key controls" line lists important outer page selectors for reference.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 

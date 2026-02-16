@@ -136,6 +136,100 @@ function detectQuizMode(pageContext) {
   return score >= 4;
 }
 
+// ── Visual Map Diffing (token optimization for quiz mode) ──
+
+function computeMapDiff(oldMap, newMap) {
+  if (!oldMap) return newMap;
+
+  // Extract element lines (lines starting with [) for comparison
+  function getElementLines(text) {
+    return text.split('\n').filter(l => l.trim().startsWith('['));
+  }
+
+  // Split map into sections by === headers
+  function splitSections(map) {
+    const sections = [];
+    const lines = map.split('\n');
+    let currentHeader = '';
+    let currentBody = [];
+
+    for (const line of lines) {
+      if (line.startsWith('===')) {
+        if (currentHeader) {
+          sections.push({ header: currentHeader, body: currentBody.join('\n') });
+        }
+        currentHeader = line;
+        currentBody = [];
+      } else {
+        currentBody.push(line);
+      }
+    }
+    if (currentHeader) {
+      sections.push({ header: currentHeader, body: currentBody.join('\n') });
+    }
+    return sections;
+  }
+
+  const oldSections = splitSections(oldMap);
+  const newSections = splitSections(newMap);
+
+  // Quick check: entire map unchanged
+  const oldEls = getElementLines(oldMap).join('\n');
+  const newEls = getElementLines(newMap).join('\n');
+  if (oldEls === newEls) return '[Page unchanged]';
+
+  const result = [];
+  result.push('=== PAGE UPDATE (diff) ===');
+  result.push('Unchanged sections omitted. Previous selectors still valid.');
+
+  for (const newSec of newSections) {
+    const isIframe = newSec.header.includes('IFRAME');
+
+    // Find matching old section
+    const oldSec = isIframe
+      ? oldSections.find(s => s.header.includes('IFRAME'))
+      : oldSections.find(s => s.header.includes('VISUAL PAGE MAP'));
+
+    const newSecEls = getElementLines(newSec.body);
+    const oldSecEls = oldSec ? getElementLines(oldSec.body) : [];
+
+    if (oldSecEls.join('\n') === newSecEls.join('\n')) {
+      // Unchanged section — compact summary
+      if (!isIframe) {
+        // Outer page: extract interactive element selectors as quick reference
+        const refs = newSecEls
+          .filter(l => l.includes('[*'))
+          .map(line => {
+            const sel = line.match(/sel="([^"]+)"/)?.[1];
+            if (!sel) return null;
+            const quotes = [...line.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+            const text = quotes.find(q =>
+              q !== sel && !q.startsWith('http') && !q.startsWith('javascript:') && q.length < 50
+            );
+            return text ? `"${text}" sel="${sel}"` : `sel="${sel}"`;
+          })
+          .filter(Boolean);
+
+        result.push('');
+        result.push(`[Outer page: ${newSecEls.length} elements unchanged]`);
+        if (refs.length > 0) {
+          result.push('Key controls: ' + refs.join(' | '));
+        }
+      } else {
+        result.push('');
+        result.push(`[Iframe: ${newSecEls.length} elements unchanged]`);
+      }
+    } else {
+      // Changed or new section — include full content
+      result.push('');
+      result.push(newSec.header);
+      result.push(newSec.body.trim());
+    }
+  }
+
+  return result.join('\n');
+}
+
 // ── Command Execution Pipeline ──
 
 async function handleExecuteCommand(command) {
@@ -156,6 +250,7 @@ async function handleExecuteCommand(command) {
     const MAX_RETRIES = 3;
     let lastSummary = '';
     let executionMode = 'normal'; // AI can switch to 'quiz' dynamically
+    let lastFullVisualMap = null; // For diff-based snapshots in quiz mode
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -180,6 +275,14 @@ async function handleExecuteCommand(command) {
       // Gather fresh page context each step
       broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
       const pageContext = await getPageContext(tab, executionMode);
+
+      // In quiz mode (step > 0): compute diff to reduce tokens sent to the AI.
+      // Store full map before diffing so next step's diff is against the full map.
+      const fullVisualMap = pageContext.visualMap;
+      if (executionMode === 'quiz' && step > 0 && lastFullVisualMap && fullVisualMap) {
+        pageContext.visualMap = computeMapDiff(lastFullVisualMap, fullVisualMap);
+      }
+      lastFullVisualMap = fullVisualMap;
 
       // Auto-detect quiz mode from page content on first step
       if (step === 0 && executionMode === 'normal' && detectQuizMode(pageContext)) {
