@@ -295,7 +295,7 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
       } else if (executionMode === 'quiz') {
-        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. You MUST: 1) Read the question text. 2) Read ALL answer options. 3) Click the CORRECT answer(s). For single-answer (radio buttons): click the one correct option. For multi-answer (checkboxes): click ONLY the correct options, uncheck wrong ones. 4) Click Next. Do NOT skip any item. If an answer is already selected, verify it is correct — if wrong, click the right one. If you see a modal about unanswered items, click Cancel and answer first. Set done=true ONLY when all items are complete.`;
+        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: drag ONE item, then snapshot to verify before dragging the next.\n5) Click Next, then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
       } else {
         message = `Continue: ${command}`;
       }
@@ -393,13 +393,26 @@ async function handleExecuteCommand(command) {
 
         // In quiz mode: break at snapshot/screenshot boundaries so the model
         // sees updated page state before deciding next action.
+        // Also break after drag actions so each drag can be verified.
         // In normal mode: execute all actions in the batch.
-        if (executionMode === 'quiz' && (action.type === 'snapshot' || action.type === 'screenshot')) {
-          if (i < response.actions.length - 1) {
-            broadcastLog('info', `Pausing after ${action.type} to re-evaluate page state (${response.actions.length - i - 1} remaining actions deferred)`);
+        if (executionMode === 'quiz') {
+          if (action.type === 'snapshot' || action.type === 'screenshot') {
+            if (i < response.actions.length - 1) {
+              broadcastLog('info', `Pausing after ${action.type} to re-evaluate page state (${response.actions.length - i - 1} remaining actions deferred)`);
+            }
+            hitSnapshot = true;
+            break;
           }
-          hitSnapshot = true;
-          break;
+          // After a drag, pause to let the page process the drop, then break
+          // so the next step re-scans and verifies the drag landed
+          if (action.type === 'drag') {
+            await new Promise(r => setTimeout(r, 800));
+            if (i < response.actions.length - 1) {
+              broadcastLog('info', `Pausing after drag to verify placement (${response.actions.length - i - 1} remaining actions deferred)`);
+              hitSnapshot = true;  // treat like snapshot break so loop continues
+              break;
+            }
+          }
         }
       }
 
@@ -493,41 +506,63 @@ async function getPageContext(tab, mode = 'normal') {
 
 // ── Multi-Frame Visual Map Collection ──
 
+// Send a message to a frame with a timeout to prevent hanging on non-responsive frames
+function sendMessageWithTimeout(tabId, msg, opts, timeout = 3000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeout);
+    chrome.tabs.sendMessage(tabId, msg, opts)
+      .then(resp => { clearTimeout(timer); resolve(resp); })
+      .catch(() => { clearTimeout(timer); resolve(null); });
+  });
+}
+
 async function collectAllFrameVisualMaps(tabId) {
-  // Discover all frames by running a lightweight script in each
-  let frameInfos;
+  // Use webNavigation.getAllFrames for reliable frame discovery
+  // (more reliable than executeScript({allFrames}) after iframe navigation)
+  let frames;
   try {
-    frameInfos = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: () => ({
-        url: location.href,
-        isTop: window === window.top,
-      })
-    });
+    frames = await chrome.webNavigation.getAllFrames({ tabId });
   } catch {
-    // Fall back to top frame only
-    const resp = await chrome.tabs.sendMessage(tabId, { type: 'GET_VISUAL_MAP' }, { frameId: 0 });
+    frames = null;
+  }
+
+  if (!frames || frames.length === 0) {
+    // Fallback: just get top frame
+    const resp = await sendMessageWithTimeout(tabId, { type: 'GET_VISUAL_MAP' }, { frameId: 0 });
     return resp?.visualMap || '';
   }
 
+  // Filter to real content frames (skip about:blank, chrome-extension://, etc.)
+  const contentFrames = frames.filter(f =>
+    f.url && (f.url.startsWith('http://') || f.url.startsWith('https://'))
+  );
+
   const maps = [];
 
-  for (const frame of frameInfos) {
+  for (const frame of contentFrames) {
+    // Ensure content script is injected in this frame
     try {
-      const resp = await chrome.tabs.sendMessage(
-        tabId,
-        { type: 'GET_VISUAL_MAP' },
-        { frameId: frame.frameId }
-      );
-      if (resp?.visualMap) {
-        maps.push({
-          frameId: frame.frameId,
-          url: frame.result.url,
-          isTop: frame.result.isTop,
-          map: resp.visualMap
-        });
-      }
-    } catch { /* frame may not have content script or may be restricted */ }
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frame.frameId] },
+        files: ['content.js']
+      });
+    } catch { /* may already be injected or frame is restricted */ }
+
+    const resp = await sendMessageWithTimeout(
+      tabId,
+      { type: 'GET_VISUAL_MAP' },
+      { frameId: frame.frameId },
+      3000
+    );
+
+    if (resp?.visualMap) {
+      maps.push({
+        frameId: frame.frameId,
+        url: frame.url,
+        isTop: frame.parentFrameId === -1,
+        map: resp.visualMap
+      });
+    }
   }
 
   if (maps.length === 0) return '';

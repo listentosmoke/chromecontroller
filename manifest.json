@@ -10,7 +10,8 @@
     "debugger",
     "scripting",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"

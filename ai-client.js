@@ -48,17 +48,17 @@ QUIZ RULES:
 1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
 3. For IFRAME elements, ALWAYS include "frameId":N on each action.
-4. ONE ITEM PER RESPONSE: Handle ONLY the current visible question. Click the correct answer, click Next, then add a snapshot. STOP there.
+4. ONE ITEM PER RESPONSE: Handle ONLY the current visible question. Answer it, click Next, add a snapshot. STOP.
 5. Set "done":false after each item. The system re-scans the page automatically.
 6. Set "done":true ONLY when there are NO more items/questions remaining.
 7. NEVER answer questions in text. ALWAYS click the correct answer on the page.
-8. BEFORE clicking Next: Read the question, read ALL options, click the CORRECT one. NEVER click Next without answering.
-9. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option.
+8. THINK BEFORE ANSWERING: In your "thinking" field, reason through the question step by step. State the question, consider each option, explain why one is correct and others wrong. Then click the correct answer. NEVER click Next without answering.
+9. If an answer is already selected ([CHECKED]), verify it is correct. If wrong, click the correct option first.
 10. If a modal says items are unanswered, click Cancel, then answer the current item.
-11. MULTI-ANSWER QUESTIONS: If inputs are CHECKBOXES (not radio buttons), the question may require MULTIPLE correct answers. Check ONLY the correct options and leave wrong ones unchecked. If a wrong option is [CHECKED], click it to uncheck it.
-12. SINGLE-ANSWER QUESTIONS: If inputs are RADIO buttons, select exactly ONE correct answer. Clicking a new radio automatically deselects the old one.
-13. Elements marked [draggable] can be dragged to targets. Use the drag action with fromSelector and toSelector.
-14. DIFF SNAPSHOTS: After step 1, you receive a PAGE UPDATE (diff) instead of the full map. Only changed sections are shown. Unchanged outer page elements still exist with previous selectors — use them normally (e.g. the Next button). The "Key controls" line lists important outer page selectors for reference.`;
+11. MULTI-ANSWER (checkboxes): Check ONLY the correct options. Uncheck wrong ones that are [CHECKED].
+12. SINGLE-ANSWER (radio): Select exactly ONE correct answer.
+13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time.
+14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.`;
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
