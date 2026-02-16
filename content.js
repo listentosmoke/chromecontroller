@@ -723,6 +723,25 @@
         return selectOption(action.selector, action.value);
       case 'drag':
         return dragElement(action.fromSelector || action.selector, action.toSelector);
+      case 'getDragCoords': {
+        const from = document.querySelector(action.fromSelector);
+        const to = document.querySelector(action.toSelector);
+        if (!from) throw new Error(`Source not found: ${action.fromSelector}`);
+        if (!to) throw new Error(`Target not found: ${action.toSelector}`);
+        from.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(300);
+        const fromRect = from.getBoundingClientRect();
+        const toRect = to.getBoundingClientRect();
+        return {
+          success: true,
+          fromX: fromRect.left + fromRect.width / 2,
+          fromY: fromRect.top + fromRect.height / 2,
+          toX: toRect.left + toRect.width / 2,
+          toY: toRect.top + toRect.height / 2,
+          fromText: from.textContent?.trim().substring(0, 50) || action.fromSelector,
+          toText: to.textContent?.trim().substring(0, 50) || action.toSelector
+        };
+      }
       case 'wait':
         if (action.selector) {
           return waitForSelector(action.selector, action.timeout);
