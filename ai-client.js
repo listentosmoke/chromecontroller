@@ -9,10 +9,11 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, tab_new, tab_close, tab_switch, tab_list
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, search, tab_new, tab_close, tab_switch, tab_list
 Format: {"type":"click","selector":"sel","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
+search: {"type":"search","query":"exact question + answer options"} — web search to verify an answer; results returned next step
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -39,9 +40,10 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, search
 Format: {"type":"click","selector":"sel","frameId":N}
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
+search: {"type":"search","query":"exact question + answer options"} — web search to verify an answer; results returned next step
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -64,7 +66,8 @@ QUIZ RULES:
 12. SINGLE-ANSWER (radio): Select exactly ONE correct answer.
 13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time. Use the screenshot to identify what image-based drag tiles depict.
 14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.
-15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.`;
+15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.
+16. SEARCH: If search results are provided (=== SEARCH RESULTS ===), use them to verify the correct answer before clicking. If you are genuinely uncertain and no results are present, emit {"type":"search","query":"<exact question> <each answer option>"} as your ONLY action — the results will be returned in the next step so you can then click the correct answer.`;
 
 // ── Vision-capable Groq models (support image_url content) ──
 // These Llama 4 models accept image inputs via the same OpenAI-compatible API.
@@ -209,6 +212,101 @@ export class AIClient {
     // For Groq: model to use when vision is needed and the primary model is text-only
     this.groqVisionModel = options.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
     this._lastVisionModelUsed = null;
+    // Search / answer-verification model (optional)
+    this.searchEnabled  = options.searchEnabled  || false;
+    this.searchModel    = options.searchModel    || '';
+    this.searchProvider = options.searchProvider || provider;  // defaults to same provider
+    this.searchApiKey   = options.searchApiKey   || apiKey;    // defaults to same key
+  }
+
+  // ── Search analyst: call the configured search model with a query and return
+  //    the answer as plain text.  The primary model receives this as context.
+  // Supports:
+  //   • Groq compound-beta / compound-beta-mini  — auto-searches the web natively
+  //   • OpenRouter groq/compound-beta etc.       — same, auto-search built in
+  //   • Any other model                          — uses training knowledge to answer
+  async executeSearch(query, pageContext) {
+    if (!this.searchEnabled || !this.searchModel) return null;
+
+    const provider = this.searchProvider;
+    const apiKey   = this.searchApiKey;
+    const baseUrl  = provider === 'groq'
+      ? PROVIDERS.groq.baseUrl
+      : PROVIDERS.openrouter.baseUrl;
+
+    // Strip provider prefix if using Groq API directly (e.g. "groq/compound-beta" → "compound-beta")
+    const modelId = provider === 'groq'
+      ? this.searchModel.replace(/^groq\//, '')
+      : this.searchModel;
+
+    const systemPrompt =
+`You are a factual web search assistant for a quiz/assessment automation bot.
+Your ONLY job: find the correct answer to the question provided.
+
+Return plain text (NOT JSON) with:
+1. CORRECT ANSWER: State the correct answer clearly and directly.
+2. EXPLANATION: 1-3 sentences explaining why it is correct.
+3. WHY OTHERS WRONG: Briefly note why the other options are incorrect (if options are provided).
+
+Be concise, factual, and confident. Do not hedge or add disclaimers.`;
+
+    // Extract just the iframe/question section to keep the query focused
+    const map = pageContext?.visualMap || '';
+    const iframeIdx = map.indexOf('=== IFRAME CONTENT');
+    const relevantMap = iframeIdx !== -1
+      ? map.substring(iframeIdx, iframeIdx + 4000)
+      : map.substring(0, 4000);
+
+    const userContent =
+`Search query / question to answer: ${query}
+
+Page context (current quiz question):
+${relevantMap}
+
+Search the web and return the correct factual answer.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userContent  }
+    ];
+
+    const headers = {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    };
+    if (provider === 'openrouter') {
+      headers['HTTP-Referer'] = 'chrome-extension://ai-browser-controller';
+      headers['X-Title']      = 'AI Browser Controller';
+    }
+
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model:       modelId,
+          messages,
+          temperature: 0.1,
+          max_tokens:  700,
+          // Note: do NOT set response_format:json — we want plain text from the analyst
+        })
+      });
+
+      if (!response.ok) return null;
+      const data = await response.json();
+
+      // Compound models may return structured tool-result content — just extract text
+      const msg = data.choices?.[0]?.message;
+      if (!msg) return null;
+
+      // If the model returned tool_calls (e.g. GPT-OSS with browser), its final
+      // text content (if any) is still useful; otherwise return null so we fall back
+      return typeof msg.content === 'string' && msg.content.trim()
+        ? msg.content.trim()
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   async validateKey() {
