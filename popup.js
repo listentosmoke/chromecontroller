@@ -160,16 +160,40 @@ document.addEventListener('DOMContentLoaded', async () => {
         modelSelect.appendChild(group);
       }
     } else {
-      // Groq: flat list
-      for (const m of models) {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        let label = m.name;
-        if (m.contextWindow) {
-          label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
+      // Groq: vision models first (in their own group), then text-only models
+      const visionModels = models.filter(m => m.isVision);
+      const textModels = models.filter(m => !m.isVision);
+
+      if (visionModels.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Vision (${visionModels.length}) — supports images & screenshots`;
+        for (const m of visionModels) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          let label = m.name.replace(' [vision]', '') + ' [vision]';
+          if (m.contextWindow) {
+            label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
+          }
+          opt.textContent = label;
+          group.appendChild(opt);
         }
-        opt.textContent = label;
-        modelSelect.appendChild(opt);
+        modelSelect.appendChild(group);
+      }
+
+      if (textModels.length > 0) {
+        const group = document.createElement('optgroup');
+        group.label = `Text (${textModels.length}) — auto-uses vision model when needed`;
+        for (const m of textModels) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          let label = m.name;
+          if (m.contextWindow) {
+            label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
+          }
+          opt.textContent = label;
+          group.appendChild(opt);
+        }
+        modelSelect.appendChild(group);
       }
     }
 

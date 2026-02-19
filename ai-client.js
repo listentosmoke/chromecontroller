@@ -18,6 +18,8 @@ OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"
 
 MODE SWITCH: If you detect a quiz, test, assessment, survey, or form with multiple questions to complete, include "mode":"quiz" in your JSON to activate enhanced quiz mode.
 
+A screenshot may be provided alongside the visual map. Use it to understand image-based content (diagrams, equations, figures, labels on drag-drop items) that cannot be captured as text.
+
 RULES:
 1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
@@ -25,7 +27,8 @@ RULES:
 4. After page-changing actions, add a snapshot to see the new state.
 5. Set "done":true when the task is complete.
 6. "actions" array is REQUIRED.
-7. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.`;
+7. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
+8. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
@@ -44,6 +47,8 @@ OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"
 
 Include "mode":"normal" to exit quiz mode when the quiz/assessment is fully done.
 
+A screenshot may be provided alongside the visual map. When IMG elements have no readable text (image-based equations, diagrams, labels on drag tiles), use the screenshot to identify what they depict before choosing an answer or drag target.
+
 QUIZ RULES:
 1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
@@ -57,8 +62,23 @@ QUIZ RULES:
 10. If a modal says items are unanswered, click Cancel, then answer the current item.
 11. MULTI-ANSWER (checkboxes): Check ONLY the correct options. Uncheck wrong ones that are [CHECKED].
 12. SINGLE-ANSWER (radio): Select exactly ONE correct answer.
-13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time.
-14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.`;
+13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time. Use the screenshot to identify what image-based drag tiles depict.
+14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.
+15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.`;
+
+// ── Vision-capable Groq models (support image_url content) ──
+// These Llama 4 models accept image inputs via the same OpenAI-compatible API.
+export const GROQ_VISION_MODELS = [
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+];
+
+// Default fallback vision model for Groq when the selected model is text-only
+export const GROQ_DEFAULT_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+
+export function isGroqVisionModel(modelId) {
+  return GROQ_VISION_MODELS.includes(modelId);
+}
 
 // ── Provider definitions (static config only, models fetched dynamically) ──
 
@@ -104,19 +124,42 @@ async function _fetchGroqModels(apiKey) {
 
   const data = await response.json();
   const models = [];
+  const seenIds = new Set();
 
   for (const m of (data.data || [])) {
-    // Only include chat models (skip whisper, tts, etc.)
-    if (m.id.includes('whisper') || m.id.includes('tts') || m.id.includes('distil')) continue;
+    // Only include chat models (skip whisper, tts, guard, etc.)
+    if (m.id.includes('whisper') || m.id.includes('tts') || m.id.includes('distil') ||
+        m.id.includes('guard') || m.id.includes('tool-use')) continue;
+
+    if (seenIds.has(m.id)) continue;
+    seenIds.add(m.id);
 
     models.push({
       id: m.id,
       name: m.id,
       contextWindow: m.context_window,
+      isVision: isGroqVisionModel(m.id),
     });
   }
 
-  models.sort((a, b) => a.id.localeCompare(b.id));
+  // Ensure the two Llama 4 vision models are always listed even if not in the API response
+  for (const visionId of GROQ_VISION_MODELS) {
+    if (!seenIds.has(visionId)) {
+      models.push({
+        id: visionId,
+        name: `${visionId} [vision]`,
+        contextWindow: 128000,
+        isVision: true,
+      });
+    }
+  }
+
+  // Sort: vision models first, then alphabetically
+  models.sort((a, b) => {
+    if (a.isVision && !b.isVision) return -1;
+    if (!a.isVision && b.isVision) return 1;
+    return a.id.localeCompare(b.id);
+  });
 
   return models;
 }
@@ -158,11 +201,14 @@ async function _fetchOpenRouterModels(apiKey) {
 // ── Unified AI Client ──
 
 export class AIClient {
-  constructor(provider, apiKey, model) {
+  constructor(provider, apiKey, model, options = {}) {
     this.provider = provider;
     this.apiKey = apiKey;
     this.model = model;
     this.conversationHistory = [];
+    // For Groq: model to use when vision is needed and the primary model is text-only
+    this.groqVisionModel = options.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+    this._lastVisionModelUsed = null;
   }
 
   async validateKey() {
@@ -218,18 +264,43 @@ export class AIClient {
       messages.push(entry);
     }
 
+    const hasScreenshot = !!(pageContext?.screenshot);
+    const needsVision = hasScreenshot || !!(pageContext?.needsVision);
+
+    // Decide which model to use: if vision is needed and current model is text-only,
+    // automatically upgrade to the Groq vision model (llama-4-scout by default).
+    let effectiveModel = this.model;
+    if (needsVision && !isGroqVisionModel(this.model)) {
+      effectiveModel = this.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+    }
+
     let textContent = `Command: ${userMessage}`;
     if (pageContext) {
       textContent += `\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textContent += `\n${pageContext.visualMap}\n`;
       }
+      if (needsVision && !hasScreenshot) {
+        textContent += '\n[Note: This page contains images that are important for answering. If image content is missing from the visual map, rely on the screenshot provided.]\n';
+      }
     }
 
-    messages.push({ role: 'user', content: textContent });
+    // Use vision (multimodal) message format when a screenshot is available
+    if (hasScreenshot) {
+      const content = [
+        { type: 'text', text: textContent },
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${pageContext.screenshot}` }
+        }
+      ];
+      messages.push({ role: 'user', content });
+    } else {
+      messages.push({ role: 'user', content: textContent });
+    }
 
     const requestBody = {
-      model: this.model,
+      model: effectiveModel,
       messages,
       temperature: 0.1,
       max_tokens: 4096,
@@ -249,7 +320,7 @@ export class AIClient {
       const err = await response.json();
       const msg = err.error?.message || `Groq API error: ${response.status}`;
       if (msg.includes('does not exist') || msg.includes('not found')) {
-        throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
+        throw new Error(`Model "${effectiveModel}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
       }
       throw new Error(msg);
     }
@@ -259,6 +330,11 @@ export class AIClient {
 
     if (!responseText) {
       throw new Error('No response from Groq');
+    }
+
+    // Log if we auto-upgraded to a vision model
+    if (effectiveModel !== this.model) {
+      this._lastVisionModelUsed = effectiveModel;
     }
 
     this.conversationHistory.push({ role: 'user', content: userMessage });
