@@ -26,6 +26,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   let loadedModels = [];
 
+  // ── Search settings elements ──
+  const searchEnabled     = document.getElementById('search-enabled');
+  const searchProviderSel = document.getElementById('search-provider-select');
+  const searchModelInput  = document.getElementById('search-model-input');
+  const searchApiKeyInput = document.getElementById('search-api-key-input');
+  const saveSearchBtn     = document.getElementById('save-search-btn');
+  const searchSaveStatus  = document.getElementById('search-save-status');
+
   // ── Update hints when provider changes ──
 
   function updateProviderHints(provider) {
@@ -48,11 +56,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ── Load saved settings ──
 
-  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+  const saved = await chrome.storage.local.get([
+    'aiProvider', 'aiModel', 'aiApiKey',
+    'searchEnabled', 'searchModel', 'searchProvider', 'searchApiKey'
+  ]);
   if (saved.aiProvider) {
     providerSelect.value = saved.aiProvider;
   }
   updateProviderHints(providerSelect.value);
+
+  // Restore search settings
+  if (saved.searchEnabled)  searchEnabled.checked        = true;
+  if (saved.searchProvider) searchProviderSel.value      = saved.searchProvider;
+  if (saved.searchModel)    searchModelInput.value        = saved.searchModel;
+  if (saved.searchApiKey)   searchApiKeyInput.value       = saved.searchApiKey;
 
   if (saved.aiApiKey && saved.aiModel) {
     // Verify the model is actually usable by doing a quick check
@@ -249,13 +266,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // ── Search settings save ──
+
+  saveSearchBtn.addEventListener('click', async () => {
+    const model = searchModelInput.value.trim();
+    if (searchEnabled.checked && !model) {
+      searchSaveStatus.textContent = 'Enter a search model ID first.';
+      searchSaveStatus.style.color = '#ea4335';
+      return;
+    }
+    await chrome.storage.local.set({
+      searchEnabled:  searchEnabled.checked,
+      searchModel:    model,
+      searchProvider: searchProviderSel.value,
+      searchApiKey:   searchApiKeyInput.value.trim(),
+    });
+    // Force client rebuild to pick up new search settings
+    await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' }).catch(() => {});
+    searchSaveStatus.textContent = searchEnabled.checked
+      ? `Search enabled — using ${model}`
+      : 'Search disabled.';
+    searchSaveStatus.style.color = '#34a853';
+    setTimeout(() => { searchSaveStatus.textContent = ''; }, 3000);
+  });
+
   // ── Settings button (go back to setup) ──
 
   settingsBtn.addEventListener('click', async () => {
-    const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+    const saved = await chrome.storage.local.get([
+      'aiProvider', 'aiModel', 'aiApiKey',
+      'searchEnabled', 'searchModel', 'searchProvider', 'searchApiKey'
+    ]);
     if (saved.aiProvider) providerSelect.value = saved.aiProvider;
     updateProviderHints(providerSelect.value);
     if (saved.aiApiKey) apiKeyInput.value = saved.aiApiKey;
+    // Restore search settings
+    searchEnabled.checked        = !!(saved.searchEnabled);
+    if (saved.searchProvider) searchProviderSel.value = saved.searchProvider;
+    if (saved.searchModel)    searchModelInput.value   = saved.searchModel;
+    if (saved.searchApiKey)   searchApiKeyInput.value  = saved.searchApiKey;
 
     setupSection.classList.remove('hidden');
     controlSection.classList.add('hidden');
@@ -366,9 +415,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     setStatus('ready', 'Ready');
 
     if (provider && model) {
-      // Show short readable name
       const shortName = model.split('/').pop().replace(/:free$/, '');
-      activeModelSpan.textContent = shortName;
+      const searchSuffix = (saved.searchEnabled && saved.searchModel)
+        ? ` + 🔍 ${saved.searchModel.split('/').pop()}`
+        : '';
+      activeModelSpan.textContent = shortName + searchSuffix;
       activeModelSpan.title = `${PROVIDERS[provider]?.name || provider} / ${model}`;
     }
   }

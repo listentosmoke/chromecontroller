@@ -70,9 +70,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ── API Key Validation ──
 
 async function handleValidateKey(provider, apiKey, model) {
-  const saved = await chrome.storage.local.get(['groqVisionModel']);
+  const saved = await chrome.storage.local.get([
+    'groqVisionModel', 'searchEnabled', 'searchModel', 'searchProvider', 'searchApiKey'
+  ]);
   const client = new AIClient(provider, apiKey, model, {
-    groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL
+    groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL,
+    searchEnabled:  !!(saved.searchEnabled && saved.searchModel),
+    searchModel:    saved.searchModel    || '',
+    searchProvider: saved.searchProvider || provider,
+    searchApiKey:   saved.searchApiKey   || apiKey,
   });
   const result = await client.validateKey();
   if (result.success) {
@@ -84,8 +90,10 @@ async function handleValidateKey(provider, apiKey, model) {
 // ── Ensure AI Client ──
 
 async function ensureClient() {
-  // Always re-check storage to pick up model/provider changes
-  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey', 'groqVisionModel']);
+  const saved = await chrome.storage.local.get([
+    'aiProvider', 'aiModel', 'aiApiKey', 'groqVisionModel',
+    'searchEnabled', 'searchModel', 'searchProvider', 'searchApiKey'
+  ]);
   if (!saved.aiApiKey) {
     throw new Error('No API key configured. Open the popup to set one.');
   }
@@ -94,18 +102,26 @@ async function ensureClient() {
   }
 
   const groqVisionModel = saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+  const searchEnabled   = !!(saved.searchEnabled && saved.searchModel);
+  const searchModel     = saved.searchModel    || '';
+  const searchProvider  = saved.searchProvider || (saved.aiProvider || 'groq');
+  const searchApiKey    = saved.searchApiKey   || saved.aiApiKey;
 
-  // Rebuild client if settings changed or client doesn't exist
+  // Rebuild if any relevant setting changed
   if (!aiClient ||
       aiClient.provider !== (saved.aiProvider || 'groq') ||
       aiClient.model !== saved.aiModel ||
       aiClient.apiKey !== saved.aiApiKey ||
-      aiClient.groqVisionModel !== groqVisionModel) {
+      aiClient.groqVisionModel !== groqVisionModel ||
+      aiClient.searchEnabled  !== searchEnabled  ||
+      aiClient.searchModel    !== searchModel    ||
+      aiClient.searchProvider !== searchProvider ||
+      aiClient.searchApiKey   !== searchApiKey) {
     aiClient = new AIClient(
       saved.aiProvider || 'groq',
       saved.aiApiKey,
       saved.aiModel,
-      { groqVisionModel }
+      { groqVisionModel, searchEnabled, searchModel, searchProvider, searchApiKey }
     );
   }
 }
@@ -301,6 +317,7 @@ async function handleExecuteCommand(command) {
     let lastSummary = '';
     let executionMode = 'normal'; // AI can switch to 'quiz' dynamically
     let lastFullVisualMap = null; // For diff-based snapshots in quiz mode
+    let lastSearchResults = null; // Injected into the next step when a search action fires
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -366,6 +383,12 @@ async function handleExecuteCommand(command) {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next, then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
       } else {
         message = `Continue: ${command}`;
+      }
+
+      // Inject search results from the previous step if available
+      if (lastSearchResults) {
+        message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer.`;
+        lastSearchResults = null; // consume; don't re-inject on following steps
       }
 
       let response = null;
@@ -444,12 +467,18 @@ async function handleExecuteCommand(command) {
 
         try {
           const result = await executeAction(action, tab, executionMode);
-          broadcastLog('success', `[${i + 1}/${response.actions.length}] ${action.type}: Done`);
+          const ok = result?.success !== false;
+          broadcastLog(ok ? 'success' : 'error',
+            `[${i + 1}/${response.actions.length}] ${action.type}: ${ok ? 'Done' : (result?.text || 'Failed')}`);
 
           if (result?.data) {
             broadcastLog('info', `Extracted: ${JSON.stringify(result.data).substring(0, 500)}`);
           }
-          if (result?.text) {
+          // For search results: store them so the NEXT step injects them into the AI message
+          if (action.type === 'search' && result?.text) {
+            lastSearchResults = result.text;
+            broadcastLog('info', `Search answer: ${result.text.substring(0, 600)}`);
+          } else if (result?.text && action.type !== 'search') {
             broadcastLog('info', result.text.substring(0, 2000));
           }
           if (result?.result) {
@@ -459,27 +488,24 @@ async function handleExecuteCommand(command) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
 
-        // In quiz mode: break at snapshot/screenshot boundaries so the model
-        // sees updated page state before deciding next action.
-        // Also break after drag actions so each drag can be verified.
-        // In normal mode: execute all actions in the batch.
-        if (executionMode === 'quiz') {
-          if (action.type === 'snapshot' || action.type === 'screenshot') {
-            if (i < response.actions.length - 1) {
-              broadcastLog('info', `Pausing after ${action.type} to re-evaluate page state (${response.actions.length - i - 1} remaining actions deferred)`);
-            }
+        // Break the action batch at boundaries that require the AI to re-evaluate:
+        //   snapshot / screenshot — page state changed
+        //   search               — results need to be injected into the next message
+        //   drag (quiz only)     — verify placement before next drag
+        const isBreakPoint = action.type === 'snapshot' || action.type === 'screenshot' || action.type === 'search';
+        if (isBreakPoint) {
+          if (i < response.actions.length - 1) {
+            broadcastLog('info', `Pausing after ${action.type} to re-evaluate (${response.actions.length - i - 1} remaining actions deferred)`);
+          }
+          hitSnapshot = true;
+          break;
+        }
+        if (executionMode === 'quiz' && action.type === 'drag') {
+          await new Promise(r => setTimeout(r, 800));
+          if (i < response.actions.length - 1) {
+            broadcastLog('info', `Pausing after drag to verify placement (${response.actions.length - i - 1} remaining actions deferred)`);
             hitSnapshot = true;
             break;
-          }
-          // After a drag, pause to let the page process the drop, then break
-          // so the next step re-scans and verifies the drag landed
-          if (action.type === 'drag') {
-            await new Promise(r => setTimeout(r, 800));
-            if (i < response.actions.length - 1) {
-              broadcastLog('info', `Pausing after drag to verify placement (${response.actions.length - i - 1} remaining actions deferred)`);
-              hitSnapshot = true;  // treat like snapshot break so loop continues
-              break;
-            }
           }
         }
       }
@@ -703,6 +729,25 @@ async function executeAction(action, tab, mode = 'normal') {
       }, sendOpts);
 
       return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
+    }
+
+    case 'search': {
+      // Call the configured search/answer-verification model with the query.
+      // The result is returned as text so the calling loop can inject it into
+      // the next AI message (same mechanism as snapshot results).
+      if (!aiClient.searchEnabled || !aiClient.searchModel) {
+        return {
+          success: false,
+          text: 'Search not configured. Enable it in Settings and set a search model (e.g. compound-beta).'
+        };
+      }
+      broadcastLog('info', `Searching: "${action.query}" via ${aiClient.searchModel}`);
+      const pageContext = await getPageContext(tab, mode).catch(() => ({}));
+      const answer = await aiClient.executeSearch(action.query, pageContext);
+      if (!answer) {
+        return { success: false, text: 'Search returned no results.' };
+      }
+      return { success: true, text: answer };
     }
 
     case 'snapshot': {
