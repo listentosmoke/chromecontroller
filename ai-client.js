@@ -252,8 +252,85 @@ export class AIClient {
     return { success: true };
   }
 
+  // ── Vision analyst: call vision model to describe screenshot, return text summary ──
+  // The analysis is free-text so the normal model can read it as context.
+  async _getVisionAnalysis(userMessage, pageContext) {
+    const visionModel = this.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+
+    const systemPrompt = `You are a visual analysis assistant helping a browser automation bot.
+Examine the screenshot and describe what you see relevant to the task. Be specific and concise.
+
+Focus on:
+1. QUESTION TEXT: Exact text of any question shown (including text inside images).
+2. ANSWER OPTIONS: Each option visible (text, images, equations, diagrams). Note which are images vs text.
+3. DRAG-AND-DROP: What each draggable tile depicts (label, image content, value). What each drop zone is labeled.
+4. IMAGE CONTENT: Describe any diagrams, charts, equations, or figures — read any embedded text/symbols.
+5. ELEMENT POSITIONS: Approximate position of key elements (e.g. "top-left", "second column", "right panel").
+6. CORRECT ANSWER HINTS: Note any visual indicators (highlights, checks, arrows) suggesting correct answers.
+
+Output plain text. Do NOT output JSON. Do NOT decide actions — only describe what you see.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `Task: ${userMessage}\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n\nAnalyze this screenshot and describe everything relevant to completing the task above.`
+          },
+          {
+            type: 'image_url',
+            image_url: { url: `data:image/png;base64,${pageContext.screenshot}` }
+          }
+        ]
+      }
+    ];
+
+    try {
+      const response = await fetch(`${PROVIDERS.groq.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: visionModel,
+          messages,
+          temperature: 0.1,
+          max_tokens: 900,  // Keep analysis concise — it's injected into the next call
+        })
+      });
+
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || null;
+    } catch {
+      return null;
+    }
+  }
+
   async _sendGroq(userMessage, pageContext, mode = 'normal') {
     const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
+
+    const hasScreenshot = !!(pageContext?.screenshot);
+    const needsVision = hasScreenshot || !!(pageContext?.needsVision);
+    const primaryIsVision = isGroqVisionModel(this.model);
+
+    // ── Two-step vision handoff (text-only primary model) ──
+    // When the page has images/screenshots but the selected model can't see them,
+    // first call the vision model as an "analyst" to describe the screenshot in
+    // plain text, then pass that analysis to the normal text model as context.
+    // This way the normal model makes all action decisions with full visual context.
+    let visionAnalysis = null;
+    if (needsVision && hasScreenshot && !primaryIsVision) {
+      visionAnalysis = await this._getVisionAnalysis(userMessage, pageContext);
+      if (visionAnalysis) {
+        this._lastVisionModelUsed = this.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+      }
+    }
+
     const messages = [
       { role: 'system', content: systemPrompt }
     ];
@@ -264,43 +341,36 @@ export class AIClient {
       messages.push(entry);
     }
 
-    const hasScreenshot = !!(pageContext?.screenshot);
-    const needsVision = hasScreenshot || !!(pageContext?.needsVision);
-
-    // Decide which model to use: if vision is needed and current model is text-only,
-    // automatically upgrade to the Groq vision model (llama-4-scout by default).
-    let effectiveModel = this.model;
-    if (needsVision && !isGroqVisionModel(this.model)) {
-      effectiveModel = this.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
-    }
-
+    // Build the text payload for the primary model
     let textContent = `Command: ${userMessage}`;
     if (pageContext) {
       textContent += `\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textContent += `\n${pageContext.visualMap}\n`;
       }
-      if (needsVision && !hasScreenshot) {
-        textContent += '\n[Note: This page contains images that are important for answering. If image content is missing from the visual map, rely on the screenshot provided.]\n';
-      }
     }
 
-    // Use vision (multimodal) message format when a screenshot is available
-    if (hasScreenshot) {
-      const content = [
-        { type: 'text', text: textContent },
-        {
-          type: 'image_url',
-          image_url: { url: `data:image/png;base64,${pageContext.screenshot}` }
-        }
-      ];
-      messages.push({ role: 'user', content });
+    // Inject vision analysis if we got one from the analyst step
+    if (visionAnalysis) {
+      textContent += `\n\n=== VISION ANALYSIS (from screenshot) ===\n${visionAnalysis}\n=== END VISION ANALYSIS ===\n\nUse the vision analysis above to understand image content, identify correct answers, and determine drag-and-drop targets.`;
+    }
+
+    // If the primary model IS a vision model, send the screenshot inline (single step)
+    if (primaryIsVision && hasScreenshot) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: textContent },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${pageContext.screenshot}` } }
+        ]
+      });
     } else {
+      // Text-only path: either no screenshot, or we already ran the vision analyst above
       messages.push({ role: 'user', content: textContent });
     }
 
     const requestBody = {
-      model: effectiveModel,
+      model: this.model,  // always use the user's chosen model for action decisions
       messages,
       temperature: 0.1,
       max_tokens: 4096,
@@ -320,7 +390,7 @@ export class AIClient {
       const err = await response.json();
       const msg = err.error?.message || `Groq API error: ${response.status}`;
       if (msg.includes('does not exist') || msg.includes('not found')) {
-        throw new Error(`Model "${effectiveModel}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
+        throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
       }
       throw new Error(msg);
     }
@@ -330,11 +400,6 @@ export class AIClient {
 
     if (!responseText) {
       throw new Error('No response from Groq');
-    }
-
-    // Log if we auto-upgraded to a vision model
-    if (effectiveModel !== this.model) {
-      this._lastVisionModelUsed = effectiveModel;
     }
 
     this.conversationHistory.push({ role: 'user', content: userMessage });

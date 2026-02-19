@@ -318,9 +318,9 @@ async function handleExecuteCommand(command) {
             pageContext.screenshot = await captureScreenshot(tab.id);
           } catch { /* non-fatal */ }
         }
-        // Log auto-upgrade only once (first step) when using Groq with a text-only model
+        // Log the two-step vision handoff only on the first step
         if (step === 0 && aiClient.provider === 'groq' && !isGroqVisionModel(aiClient.model)) {
-          broadcastLog('info', `Page has images/drag-drop — auto-using vision model (${aiClient.groqVisionModel})`);
+          broadcastLog('info', `Page has images/drag-drop — vision analyst (${aiClient.groqVisionModel}) will describe screenshot, then ${aiClient.model} decides actions`);
         }
       }
 
@@ -659,43 +659,31 @@ async function executeAction(action, tab, mode = 'normal') {
         action
       }, sendOpts);
 
-    case 'drag':
-      // Quiz mode: use click-click pattern (click source to select, click target to place)
-      // Learnosity's accessibility mode supports this interaction model
-      if (mode === 'quiz') {
-        const fromSel = action.fromSelector || action.selector;
-        const toSel = action.toSelector;
-        broadcastLog('info', `Quiz drag: clicking source "${fromSel}" then target "${toSel}"`);
+    case 'drag': {
+      // Always use click-click: click the source to select it, then click the
+      // target to place it. This is universally supported (Learnosity, SortableJS,
+      // accessibility frameworks, etc.) without requiring trusted CDP mouse events.
+      const fromSel = action.fromSelector || action.selector;
+      const toSel = action.toSelector;
+      broadcastLog('info', `Drag: clicking source "${fromSel}" then target "${toSel}"`);
 
-        // Click the draggable item to select it
-        await chrome.tabs.sendMessage(tab.id, {
-          type: 'EXECUTE_ACTION',
-          action: { type: 'click', selector: fromSel, description: 'Select drag item' }
-        }, sendOpts);
+      // Click the draggable item to select/pick it up
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'EXECUTE_ACTION',
+        action: { type: 'click', selector: fromSel, description: 'Select drag source' }
+      }, sendOpts);
 
-        // Brief pause to let the framework register the selection
-        await new Promise(r => setTimeout(r, 500));
+      // Pause to let the framework register the selection
+      await new Promise(r => setTimeout(r, 500));
 
-        // Click the drop target to place the item
-        const result = await chrome.tabs.sendMessage(tab.id, {
-          type: 'EXECUTE_ACTION',
-          action: { type: 'click', selector: toSel, description: 'Place in drop target' }
-        }, sendOpts);
+      // Click the drop target to place the item
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'EXECUTE_ACTION',
+        action: { type: 'click', selector: toSel, description: 'Click drop target' }
+      }, sendOpts);
 
-        const fromText = result?.text || fromSel;
-        return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
-      }
-
-      // Normal mode: use CDP for trusted mouse events (synthetic events are ignored by most frameworks)
-      try {
-        return await executeDragViaCDP(action, tab, sendOpts);
-      } catch (cdpErr) {
-        // Fallback to content script synthetic events
-        broadcastLog('info', `CDP drag failed (${cdpErr.message}), falling back to synthetic events`);
-        return await chrome.tabs.sendMessage(tab.id, {
-          type: 'EXECUTE_ACTION', action
-        }, sendOpts);
-      }
+      return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
+    }
 
     case 'snapshot': {
       if (mode === 'quiz') {
