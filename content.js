@@ -728,16 +728,28 @@
         const to = document.querySelector(action.toSelector);
         if (!from) throw new Error(`Source not found: ${action.fromSelector}`);
         if (!to) throw new Error(`Target not found: ${action.toSelector}`);
-        from.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Scroll source into view instantly so its rect is stable
+        from.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
         await sleep(300);
         const fromRect = from.getBoundingClientRect();
         const toRect = to.getBoundingClientRect();
         return {
           success: true,
-          fromX: fromRect.left + fromRect.width / 2,
-          fromY: fromRect.top + fromRect.height / 2,
-          toX: toRect.left + toRect.width / 2,
-          toY: toRect.top + toRect.height / 2,
+          // ABSOLUTE page coordinates (rect + scroll offset).
+          // Background uses these to scroll the main-frame viewport and compute
+          // the correct viewport-relative position for CDP mouse events.
+          fromX: fromRect.left + fromRect.width / 2 + window.scrollX,
+          fromY: fromRect.top + fromRect.height / 2 + window.scrollY,
+          toX: toRect.left + toRect.width / 2 + window.scrollX,
+          toY: toRect.top + toRect.height / 2 + window.scrollY,
+          // Viewport-relative coords (used for iframe elements where the caller
+          // adds the iframe's own viewport offset instead of scrolling the parent).
+          fromViewX: fromRect.left + fromRect.width / 2,
+          fromViewY: fromRect.top + fromRect.height / 2,
+          toViewX: toRect.left + toRect.width / 2,
+          toViewY: toRect.top + toRect.height / 2,
+          viewportW: window.innerWidth,
+          viewportH: window.innerHeight,
           fromText: from.textContent?.trim().substring(0, 50) || action.fromSelector,
           toText: to.textContent?.trim().substring(0, 50) || action.toSelector
         };

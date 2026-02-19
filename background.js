@@ -1,5 +1,5 @@
 // background.js — Service worker: orchestrates AI client, debugger, tab groups, and content scripts
-import { AIClient, fetchModels } from './ai-client.js';
+import { AIClient, fetchModels, isGroqVisionModel, GROQ_DEFAULT_VISION_MODEL } from './ai-client.js';
 
 let aiClient = null;
 let isExecuting = false;
@@ -70,7 +70,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ── API Key Validation ──
 
 async function handleValidateKey(provider, apiKey, model) {
-  const client = new AIClient(provider, apiKey, model);
+  const saved = await chrome.storage.local.get(['groqVisionModel']);
+  const client = new AIClient(provider, apiKey, model, {
+    groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL
+  });
   const result = await client.validateKey();
   if (result.success) {
     aiClient = client;
@@ -82,7 +85,7 @@ async function handleValidateKey(provider, apiKey, model) {
 
 async function ensureClient() {
   // Always re-check storage to pick up model/provider changes
-  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey']);
+  const saved = await chrome.storage.local.get(['aiProvider', 'aiModel', 'aiApiKey', 'groqVisionModel']);
   if (!saved.aiApiKey) {
     throw new Error('No API key configured. Open the popup to set one.');
   }
@@ -90,15 +93,19 @@ async function ensureClient() {
     throw new Error('No model selected. Open the popup, load models, and pick one.');
   }
 
+  const groqVisionModel = saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
+
   // Rebuild client if settings changed or client doesn't exist
   if (!aiClient ||
       aiClient.provider !== (saved.aiProvider || 'groq') ||
       aiClient.model !== saved.aiModel ||
-      aiClient.apiKey !== saved.aiApiKey) {
+      aiClient.apiKey !== saved.aiApiKey ||
+      aiClient.groqVisionModel !== groqVisionModel) {
     aiClient = new AIClient(
       saved.aiProvider || 'groq',
       saved.aiApiKey,
-      saved.aiModel
+      saved.aiModel,
+      { groqVisionModel }
     );
   }
 }
@@ -134,6 +141,29 @@ function detectQuizMode(pageContext) {
   }
 
   return score >= 4;
+}
+
+// ── Vision Need Detection ──
+// Returns true when the page has content that requires vision to understand:
+//   • IMG elements present in the visual map (could contain question diagrams/equations)
+//   • Drag-and-drop elements (visual positioning matters for drop zones)
+//   • Elements that have no readable text (image-only content)
+function detectNeedsVision(pageContext) {
+  const map = pageContext.visualMap || '';
+
+  // IMG tags in the visual map — may contain question text or diagrams
+  const hasImages = map.includes('[IMG]') || map.includes('[*IMG]');
+
+  // Draggable elements indicate a drag-and-drop question where visual
+  // layout is critical for identifying correct drop targets
+  const hasDragDrop = map.includes('[draggable]') || map.includes('[droptarget]');
+
+  // IMG elements with very short/no text content are likely image-only questions
+  // e.g., math equations rendered as images
+  const imageLinesNoText = (map.match(/\[[\*]?IMG\][^\n]*(?:"[^"]{0,10}"|(?!\s*"))/g) || []).length;
+  const hasImageOnlyContent = imageLinesNoText > 0;
+
+  return hasImages || hasDragDrop || hasImageOnlyContent;
 }
 
 // ── Visual Map Diffing (token optimization for quiz mode) ──
@@ -275,6 +305,24 @@ async function handleExecuteCommand(command) {
       // Gather fresh page context each step
       broadcastStatus('busy', step === 0 ? 'Analyzing page...' : `Step ${step + 1}: Re-analyzing...`);
       const pageContext = await getPageContext(tab, executionMode);
+
+      // Detect if this page needs vision (images, drag-drop, image-only questions).
+      // When vision is needed: flag it so the AI client can route to a vision model,
+      // and ensure a screenshot is always captured so the model can see the page.
+      const needsVision = detectNeedsVision(pageContext);
+      if (needsVision) {
+        pageContext.needsVision = true;
+        if (!pageContext.screenshot) {
+          // Screenshot capture may have failed earlier — retry now
+          try {
+            pageContext.screenshot = await captureScreenshot(tab.id);
+          } catch { /* non-fatal */ }
+        }
+        // Log auto-upgrade only once (first step) when using Groq with a text-only model
+        if (step === 0 && aiClient.provider === 'groq' && !isGroqVisionModel(aiClient.model)) {
+          broadcastLog('info', `Page has images/drag-drop — auto-using vision model (${aiClient.groqVisionModel})`);
+        }
+      }
 
       // In quiz mode (step > 0): compute diff to reduce tokens sent to the AI.
       // Store full map before diffing so next step's diff is against the full map.
@@ -740,7 +788,7 @@ async function executeDragViaCDP(action, tab, sendOpts) {
   const fromSelector = action.fromSelector || action.selector;
   const toSelector = action.toSelector;
 
-  // Get element coordinates from the content script in the correct frame
+  // Get element coordinates (absolute page coords) from the content script
   const coords = await chrome.tabs.sendMessage(tab.id, {
     type: 'EXECUTE_ACTION',
     action: { type: 'getDragCoords', fromSelector, toSelector }
@@ -750,18 +798,31 @@ async function executeDragViaCDP(action, tab, sendOpts) {
     throw new Error(coords?.error || 'Could not get drag element coordinates');
   }
 
-  let { fromX, fromY, toX, toY, fromText, toText } = coords;
+  // coords are ABSOLUTE page coordinates (include scroll offset).
+  // For iframe elements, we also have viewport-relative coords (fromViewX etc.)
+  let { fromX, fromY, toX, toY, fromViewX, fromViewY, toViewX, toViewY, fromText, toText, viewportW, viewportH } = coords;
 
-  // If targeting an iframe, offset coords by the iframe's position in the page
   const frameId = action.frameId;
-  if (frameId !== undefined && frameId !== null && frameId !== 0) {
-    const offset = await getIframeOffset(tab.id);
-    if (offset) {
-      fromX += offset.left;
-      fromY += offset.top;
-      toX += offset.left;
-      toY += offset.top;
-    }
+  const isIframeAction = frameId !== undefined && frameId !== null && frameId !== 0;
+
+  // Helper: get current scroll position of the main tab via CDP
+  async function getScroll() {
+    const r = await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
+      expression: 'JSON.stringify({x: window.scrollX, y: window.scrollY})',
+      returnByValue: true
+    });
+    return JSON.parse(r.result?.value || '{"x":0,"y":0}');
+  }
+
+  // Helper: scroll main page so that absY is centered in viewport
+  async function scrollToShowY(absY) {
+    const vH = viewportH || 600;
+    const targetScrollY = Math.max(0, Math.round(absY - vH / 2));
+    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
+      expression: `window.scrollTo(window.scrollX, ${targetScrollY})`,
+      returnByValue: false
+    });
+    await new Promise(r => setTimeout(r, 250));
   }
 
   // Highlight the source element for visual feedback
@@ -774,33 +835,83 @@ async function executeDragViaCDP(action, tab, sendOpts) {
   // Use CDP for trusted mouse events (event.isTrusted = true)
   await attachDebugger(tab.id);
 
-  // Press on source
+  let vFromX, vFromY, vToX, vToY;
+
+  if (isIframeAction) {
+    // For iframe elements: add the iframe's viewport-relative offset to the
+    // element's iframe-internal viewport-relative coords.
+    // This avoids double-counting the parent scroll offset.
+    const offset = await getIframeOffset(tab.id);
+    const iframeLeft = offset?.left || 0;
+    const iframeTop = offset?.top || 0;
+    vFromX = Math.round((fromViewX ?? (fromRect?.left + fromRect?.width / 2)) + iframeLeft);
+    vFromY = Math.round((fromViewY ?? (fromRect?.top + fromRect?.height / 2)) + iframeTop);
+    vToX   = Math.round((toViewX   ?? (toRect?.left   + toRect?.width / 2))   + iframeLeft);
+    vToY   = Math.round((toViewY   ?? (toRect?.top    + toRect?.height / 2))   + iframeTop);
+  } else {
+    // For main-frame elements: scroll page to center source, compute viewport coords
+    await scrollToShowY(fromY);
+    const scroll1 = await getScroll();
+    vFromX = Math.round(fromX - scroll1.x);
+    vFromY = Math.round(fromY - scroll1.y);
+    // Pre-compute target viewport coords after scrolling to target (done before release)
+    const scroll1b = await getScroll(); // same as scroll1 at this point
+    vToX = Math.round(toX - scroll1b.x); // updated after scrolling to target later
+    vToY = Math.round(toY - scroll1b.y);
+  }
+
+  // Press on source (viewport-relative coords)
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
     type: 'mousePressed',
-    x: Math.round(fromX), y: Math.round(fromY),
+    x: vFromX, y: vFromY,
     button: 'left', clickCount: 1
   });
   await new Promise(r => setTimeout(r, 200));
 
-  // Move smoothly to target in steps
-  const steps = 15;
+  // Move smoothly toward the target.
+  // For main-frame: scroll partway through so the drop zone comes into view.
+  // For iframe: elements are within the iframe viewport; no main-page scroll needed.
+  const steps = 20;
   for (let i = 1; i <= steps; i++) {
-    const x = fromX + (toX - fromX) * (i / steps);
-    const y = fromY + (toY - fromY) * (i / steps);
+    const progress = i / steps;
+    let vx, vy;
+
+    if (isIframeAction) {
+      vx = Math.round(vFromX + (vToX - vFromX) * progress);
+      vy = Math.round(vFromY + (vToY - vFromY) * progress);
+    } else {
+      // At the halfway point, re-scroll so the destination comes into view
+      if (i === Math.floor(steps / 2)) {
+        await scrollToShowY(toY);
+      }
+      const scroll = await getScroll();
+      const absX = fromX + (toX - fromX) * progress;
+      const absY = fromY + (toY - fromY) * progress;
+      vx = Math.round(absX - scroll.x);
+      vy = Math.round(absY - scroll.y);
+    }
+
     await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
       type: 'mouseMoved',
-      x: Math.round(x), y: Math.round(y),
+      x: vx, y: vy,
       button: 'left'
     });
-    await new Promise(r => setTimeout(r, 40));
+    await new Promise(r => setTimeout(r, 30));
   }
 
   await new Promise(r => setTimeout(r, 100));
 
-  // Release on target
+  // For main-frame: scroll so target is centered, then get final viewport coords
+  if (!isIframeAction) {
+    await scrollToShowY(toY);
+    const scroll2 = await getScroll();
+    vToX = Math.round(toX - scroll2.x);
+    vToY = Math.round(toY - scroll2.y);
+  }
+
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
     type: 'mouseReleased',
-    x: Math.round(toX), y: Math.round(toY),
+    x: vToX, y: vToY,
     button: 'left', clickCount: 1
   });
 
