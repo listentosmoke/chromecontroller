@@ -144,26 +144,46 @@ function detectQuizMode(pageContext) {
 }
 
 // ── Vision Need Detection ──
-// Returns true when the page has content that requires vision to understand:
-//   • IMG elements present in the visual map (could contain question diagrams/equations)
-//   • Drag-and-drop elements (visual positioning matters for drop zones)
-//   • Elements that have no readable text (image-only content)
+// Returns true ONLY when the IFRAME (quiz question area) contains large images
+// with no readable text — i.e. image-based questions like equations or diagrams
+// that the text model genuinely cannot understand from the visual map alone.
+// Does NOT trigger for: draggable elements, outer-page images, small icons,
+// or images that have alt text the text model can already read.
 function detectNeedsVision(pageContext) {
   const map = pageContext.visualMap || '';
 
-  // IMG tags in the visual map — may contain question text or diagrams
-  const hasImages = map.includes('[IMG]') || map.includes('[*IMG]');
+  // Only examine IFRAME content (where quiz questions live).
+  // Outer-page images are navigation chrome — never worth a vision call.
+  const iframeIdx = map.indexOf('=== IFRAME CONTENT');
+  if (iframeIdx === -1) return false;
 
-  // Draggable elements indicate a drag-and-drop question where visual
-  // layout is critical for identifying correct drop targets
-  const hasDragDrop = map.includes('[draggable]') || map.includes('[droptarget]');
+  const iframeContent = map.substring(iframeIdx);
+  const lines = iframeContent.split('\n');
 
-  // IMG elements with very short/no text content are likely image-only questions
-  // e.g., math equations rendered as images
-  const imageLinesNoText = (map.match(/\[[\*]?IMG\][^\n]*(?:"[^"]{0,10}"|(?!\s*"))/g) || []).length;
-  const hasImageOnlyContent = imageLinesNoText > 0;
+  for (const line of lines) {
+    // Only care about IMG elements
+    if (!line.includes('[IMG]') && !line.includes('[*IMG]')) continue;
 
-  return hasImages || hasDragDrop || hasImageOnlyContent;
+    // Parse dimensions: @(x,y WxH) — skip small icons (< 50px either side)
+    const dimMatch = line.match(/@\(\d+,\d+\s+(\d+)x(\d+)\)/);
+    if (!dimMatch) continue;
+    const w = parseInt(dimMatch[1], 10);
+    const h = parseInt(dimMatch[2], 10);
+    if (w < 50 || h < 50) continue;
+
+    // Check for meaningful text after the selector.
+    // Strip the sel="..." portion, then look for any remaining quoted text.
+    const afterSel = line.replace(/sel="[^"]*"/, '');
+    const textMatch = afterSel.match(/"([^"]*)"/);
+    const textContent = textMatch ? textMatch[1].trim() : '';
+
+    // Large image with no/minimal text → image-based question content
+    if (textContent.length < 10) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // ── Visual Map Diffing (token optimization for quiz mode) ──
