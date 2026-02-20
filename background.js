@@ -75,10 +75,10 @@ async function handleValidateKey(provider, apiKey, model) {
   ]);
   const client = new AIClient(provider, apiKey, model, {
     groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL,
-    searchEnabled:  !!(saved.searchEnabled && saved.searchModel),
-    searchModel:    saved.searchModel    || '',
-    searchProvider: saved.searchProvider || provider,
-    searchApiKey:   saved.searchApiKey   || apiKey,
+    searchEnabled:  !!saved.searchModel,
+    searchModel:    saved.searchModel || '',
+    searchProvider: 'groq',
+    searchApiKey:   apiKey,
   });
   const result = await client.validateKey();
   if (result.success) {
@@ -102,10 +102,10 @@ async function ensureClient() {
   }
 
   const groqVisionModel = saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
-  const searchEnabled   = !!(saved.searchEnabled && saved.searchModel);
-  const searchModel     = saved.searchModel    || '';
-  const searchProvider  = saved.searchProvider || (saved.aiProvider || 'groq');
-  const searchApiKey    = saved.searchApiKey   || saved.aiApiKey;
+  const searchEnabled   = !!saved.searchModel;
+  const searchModel     = saved.searchModel || '';
+  const searchProvider  = 'groq';  // search always uses Groq compound models
+  const searchApiKey    = saved.aiApiKey;  // always uses primary API key
 
   // Rebuild if any relevant setting changed
   if (!aiClient ||
@@ -200,6 +200,34 @@ function detectNeedsVision(pageContext) {
   }
 
   return false;
+}
+
+// ── Quiz Question Extraction (for automatic search) ──
+// Parses the visual map's IFRAME section to extract the question text and answer
+// options, which are then sent to the search model for automatic verification.
+function extractQuizQuestion(visualMap) {
+  if (!visualMap) return null;
+  const iframeIdx = visualMap.indexOf('=== IFRAME CONTENT');
+  if (iframeIdx === -1) return null;
+
+  const iframeContent = visualMap.substring(iframeIdx);
+  const lines = iframeContent.split('\n');
+  const texts = [];
+
+  for (const line of lines) {
+    // Extract text content: the bare "text" that follows sel="selector"
+    const match = line.match(/sel="[^"]*"\s+"([^"]+)"/);
+    if (!match) continue;
+    const text = match[1].trim();
+    if (text.length < 3) continue;
+    // Skip common UI button labels
+    if (/^(Next|Previous|Back|Submit|Cancel|Close|Save|Check Answer|Review|Finish|Done|OK|Item \d)$/i.test(text)) continue;
+    texts.push(text);
+  }
+
+  if (texts.length === 0) return null;
+  // First items are typically the question + answer options
+  return texts.slice(0, 15).join(' | ');
 }
 
 // ── Visual Map Diffing (token optimization for quiz mode) ──
@@ -317,7 +345,8 @@ async function handleExecuteCommand(command) {
     let lastSummary = '';
     let executionMode = 'normal'; // AI can switch to 'quiz' dynamically
     let lastFullVisualMap = null; // For diff-based snapshots in quiz mode
-    let lastSearchResults = null; // Injected into the next step when a search action fires
+    let lastSearchResults = null; // Injected into the next step when search fires
+    let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -373,6 +402,27 @@ async function handleExecuteCommand(command) {
       if (step === 0 && executionMode === 'normal' && detectQuizMode(pageContext)) {
         executionMode = 'quiz';
         broadcastLog('info', 'Auto-detected quiz/assessment — switched to quiz mode');
+      }
+
+      // ── Automatic search: when in quiz mode with search enabled, extract the
+      //    question from the iframe and call the search model BEFORE the AI acts.
+      //    This makes search mandatory for every new question (no AI opt-out).
+      if (executionMode === 'quiz' && aiClient.searchEnabled && !lastSearchResults) {
+        const question = extractQuizQuestion(fullVisualMap);
+        if (question && question !== lastSearchedQuestion) {
+          broadcastLog('info', `Auto-searching: "${question.substring(0, 120)}..."`);
+          broadcastStatus('busy', 'Verifying answer via web search...');
+          try {
+            const searchResult = await aiClient.executeSearch(question, { ...pageContext, visualMap: fullVisualMap });
+            if (searchResult) {
+              lastSearchResults = searchResult;
+              lastSearchedQuestion = question;
+              broadcastLog('info', `Search answer: ${searchResult.substring(0, 300)}`);
+            }
+          } catch (err) {
+            broadcastLog('error', `Search failed: ${err.message}`);
+          }
+        }
       }
 
       // Build message — mode-specific continuation prompts
@@ -706,29 +756,16 @@ async function executeAction(action, tab, mode = 'normal') {
       }, sendOpts);
 
     case 'drag': {
-      // Always use click-click: click the source to select it, then click the
-      // target to place it. This is universally supported (Learnosity, SortableJS,
-      // accessibility frameworks, etc.) without requiring trusted CDP mouse events.
+      // Forward to content script's dragElement() which dispatches the full
+      // PointerEvent + MouseEvent + HTML5 DragEvent sequence. This works with
+      // Learnosity, SortableJS, jQuery UI, and custom drag-and-drop frameworks.
       const fromSel = action.fromSelector || action.selector;
       const toSel = action.toSelector;
-      broadcastLog('info', `Drag: clicking source "${fromSel}" then target "${toSel}"`);
-
-      // Click the draggable item to select/pick it up
-      await chrome.tabs.sendMessage(tab.id, {
+      broadcastLog('info', `Drag: "${fromSel}" → "${toSel}"`);
+      return await chrome.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_ACTION',
-        action: { type: 'click', selector: fromSel, description: 'Select drag source' }
+        action: { type: 'drag', fromSelector: fromSel, toSelector: toSel }
       }, sendOpts);
-
-      // Pause to let the framework register the selection
-      await new Promise(r => setTimeout(r, 500));
-
-      // Click the drop target to place the item
-      await chrome.tabs.sendMessage(tab.id, {
-        type: 'EXECUTE_ACTION',
-        action: { type: 'click', selector: toSel, description: 'Click drop target' }
-      }, sendOpts);
-
-      return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
     }
 
     case 'search': {
@@ -738,7 +775,7 @@ async function executeAction(action, tab, mode = 'normal') {
       if (!aiClient.searchEnabled || !aiClient.searchModel) {
         return {
           success: false,
-          text: 'Search not configured. Enable it in Settings and set a search model (e.g. compound-beta).'
+          text: 'Search not configured. Enable it in Settings and select a search model (e.g. compound).'
         };
       }
       broadcastLog('info', `Searching: "${action.query}" via ${aiClient.searchModel}`);
@@ -832,170 +869,6 @@ async function executeAction(action, tab, mode = 'normal') {
 
     default:
       throw new Error(`Unknown action type: ${action.type}`);
-  }
-}
-
-// ── CDP-Based Drag and Drop ──
-
-async function executeDragViaCDP(action, tab, sendOpts) {
-  const fromSelector = action.fromSelector || action.selector;
-  const toSelector = action.toSelector;
-
-  // Get element coordinates (absolute page coords) from the content script
-  const coords = await chrome.tabs.sendMessage(tab.id, {
-    type: 'EXECUTE_ACTION',
-    action: { type: 'getDragCoords', fromSelector, toSelector }
-  }, sendOpts);
-
-  if (!coords?.success) {
-    throw new Error(coords?.error || 'Could not get drag element coordinates');
-  }
-
-  // coords are ABSOLUTE page coordinates (include scroll offset).
-  // For iframe elements, we also have viewport-relative coords (fromViewX etc.)
-  let { fromX, fromY, toX, toY, fromViewX, fromViewY, toViewX, toViewY, fromText, toText, viewportW, viewportH } = coords;
-
-  const frameId = action.frameId;
-  const isIframeAction = frameId !== undefined && frameId !== null && frameId !== 0;
-
-  // Helper: get current scroll position of the main tab via CDP
-  async function getScroll() {
-    const r = await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
-      expression: 'JSON.stringify({x: window.scrollX, y: window.scrollY})',
-      returnByValue: true
-    });
-    return JSON.parse(r.result?.value || '{"x":0,"y":0}');
-  }
-
-  // Helper: scroll main page so that absY is centered in viewport
-  async function scrollToShowY(absY) {
-    const vH = viewportH || 600;
-    const targetScrollY = Math.max(0, Math.round(absY - vH / 2));
-    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', {
-      expression: `window.scrollTo(window.scrollX, ${targetScrollY})`,
-      returnByValue: false
-    });
-    await new Promise(r => setTimeout(r, 250));
-  }
-
-  // Highlight the source element for visual feedback
-  try {
-    await chrome.tabs.sendMessage(tab.id, {
-      type: 'HIGHLIGHT', selector: fromSelector, label: 'dragging'
-    }, sendOpts);
-  } catch { /* ignore */ }
-
-  // Use CDP for trusted mouse events (event.isTrusted = true)
-  await attachDebugger(tab.id);
-
-  let vFromX, vFromY, vToX, vToY;
-
-  if (isIframeAction) {
-    // For iframe elements: add the iframe's viewport-relative offset to the
-    // element's iframe-internal viewport-relative coords.
-    // This avoids double-counting the parent scroll offset.
-    const offset = await getIframeOffset(tab.id);
-    const iframeLeft = offset?.left || 0;
-    const iframeTop = offset?.top || 0;
-    vFromX = Math.round((fromViewX ?? (fromRect?.left + fromRect?.width / 2)) + iframeLeft);
-    vFromY = Math.round((fromViewY ?? (fromRect?.top + fromRect?.height / 2)) + iframeTop);
-    vToX   = Math.round((toViewX   ?? (toRect?.left   + toRect?.width / 2))   + iframeLeft);
-    vToY   = Math.round((toViewY   ?? (toRect?.top    + toRect?.height / 2))   + iframeTop);
-  } else {
-    // For main-frame elements: scroll page to center source, compute viewport coords
-    await scrollToShowY(fromY);
-    const scroll1 = await getScroll();
-    vFromX = Math.round(fromX - scroll1.x);
-    vFromY = Math.round(fromY - scroll1.y);
-    // Pre-compute target viewport coords after scrolling to target (done before release)
-    const scroll1b = await getScroll(); // same as scroll1 at this point
-    vToX = Math.round(toX - scroll1b.x); // updated after scrolling to target later
-    vToY = Math.round(toY - scroll1b.y);
-  }
-
-  // Press on source (viewport-relative coords)
-  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
-    type: 'mousePressed',
-    x: vFromX, y: vFromY,
-    button: 'left', clickCount: 1
-  });
-  await new Promise(r => setTimeout(r, 200));
-
-  // Move smoothly toward the target.
-  // For main-frame: scroll partway through so the drop zone comes into view.
-  // For iframe: elements are within the iframe viewport; no main-page scroll needed.
-  const steps = 20;
-  for (let i = 1; i <= steps; i++) {
-    const progress = i / steps;
-    let vx, vy;
-
-    if (isIframeAction) {
-      vx = Math.round(vFromX + (vToX - vFromX) * progress);
-      vy = Math.round(vFromY + (vToY - vFromY) * progress);
-    } else {
-      // At the halfway point, re-scroll so the destination comes into view
-      if (i === Math.floor(steps / 2)) {
-        await scrollToShowY(toY);
-      }
-      const scroll = await getScroll();
-      const absX = fromX + (toX - fromX) * progress;
-      const absY = fromY + (toY - fromY) * progress;
-      vx = Math.round(absX - scroll.x);
-      vy = Math.round(absY - scroll.y);
-    }
-
-    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved',
-      x: vx, y: vy,
-      button: 'left'
-    });
-    await new Promise(r => setTimeout(r, 30));
-  }
-
-  await new Promise(r => setTimeout(r, 100));
-
-  // For main-frame: scroll so target is centered, then get final viewport coords
-  if (!isIframeAction) {
-    await scrollToShowY(toY);
-    const scroll2 = await getScroll();
-    vToX = Math.round(toX - scroll2.x);
-    vToY = Math.round(toY - scroll2.y);
-  }
-
-  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
-    type: 'mouseReleased',
-    x: vToX, y: vToY,
-    button: 'left', clickCount: 1
-  });
-
-  await new Promise(r => setTimeout(r, 300));
-
-  // Hide highlight
-  try {
-    await chrome.tabs.sendMessage(tab.id, { type: 'HIDE_HIGHLIGHT' }, sendOpts);
-  } catch { /* ignore */ }
-
-  return { success: true, text: `Dragged "${fromText}" → "${toText}"` };
-}
-
-async function getIframeOffset(tabId) {
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId, frameIds: [0] },
-      func: () => {
-        const iframes = document.querySelectorAll('iframe');
-        for (const iframe of iframes) {
-          const rect = iframe.getBoundingClientRect();
-          if (rect.width > 100 && rect.height > 100) {
-            return { top: rect.top, left: rect.left };
-          }
-        }
-        return null;
-      }
-    });
-    return results?.[0]?.result || null;
-  } catch {
-    return null;
   }
 }
 

@@ -9,11 +9,10 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, search, tab_new, tab_close, tab_switch, tab_list
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, tab_new, tab_close, tab_switch, tab_list
 Format: {"type":"click","selector":"sel","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
-search: {"type":"search","query":"exact question + answer options"} — web search to verify an answer; results returned next step
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -40,10 +39,9 @@ You see a Visual Page Map of page elements. Each line:
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
-ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, search
+ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag
 Format: {"type":"click","selector":"sel","frameId":N}
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
-search: {"type":"search","query":"exact question + answer options"} — web search to verify an answer; results returned next step
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -67,7 +65,7 @@ QUIZ RULES:
 13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time. Use the screenshot to identify what image-based drag tiles depict.
 14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.
 15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.
-16. SEARCH: If search results are provided (=== SEARCH RESULTS ===), use them to verify the correct answer before clicking. If you are genuinely uncertain and no results are present, emit {"type":"search","query":"<exact question> <each answer option>"} as your ONLY action — the results will be returned in the next step so you can then click the correct answer.`;
+16. SEARCH RESULTS: If search results are provided (=== SEARCH RESULTS ===), they contain the verified correct answer from a web search. ALWAYS use them to select the correct answer. Trust the search results over your own knowledge.`;
 
 // ── Vision-capable Groq models (support image_url content) ──
 // These Llama 4 models accept image inputs via the same OpenAI-compatible API.
@@ -222,9 +220,8 @@ export class AIClient {
   // ── Search analyst: call the configured search model with a query and return
   //    the answer as plain text.  The primary model receives this as context.
   // Supports:
-  //   • Groq compound-beta / compound-beta-mini  — auto-searches the web natively
-  //   • OpenRouter groq/compound-beta etc.       — same, auto-search built in
-  //   • Any other model                          — uses training knowledge to answer
+  //   • Groq compound / compound-mini — auto-searches the web natively
+  //   • Any other model               — uses training knowledge to answer
   async executeSearch(query, pageContext) {
     if (!this.searchEnabled || !this.searchModel) return null;
 

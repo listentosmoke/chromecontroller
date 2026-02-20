@@ -27,10 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let loadedModels = [];
 
   // ── Search settings elements ──
-  const searchEnabled     = document.getElementById('search-enabled');
-  const searchProviderSel = document.getElementById('search-provider-select');
-  const searchModelInput  = document.getElementById('search-model-input');
-  const searchApiKeyInput = document.getElementById('search-api-key-input');
+  const searchModelSelect = document.getElementById('search-model-select');
   const saveSearchBtn     = document.getElementById('save-search-btn');
   const searchSaveStatus  = document.getElementById('search-save-status');
 
@@ -66,10 +63,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateProviderHints(providerSelect.value);
 
   // Restore search settings
-  if (saved.searchEnabled)  searchEnabled.checked        = true;
-  if (saved.searchProvider) searchProviderSel.value      = saved.searchProvider;
-  if (saved.searchModel)    searchModelInput.value        = saved.searchModel;
-  if (saved.searchApiKey)   searchApiKeyInput.value       = saved.searchApiKey;
+  if (saved.searchModel) searchModelSelect.value = saved.searchModel;
 
   if (saved.aiApiKey && saved.aiModel) {
     // Verify the model is actually usable by doing a quick check
@@ -269,21 +263,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Search settings save ──
 
   saveSearchBtn.addEventListener('click', async () => {
-    const model = searchModelInput.value.trim();
-    if (searchEnabled.checked && !model) {
-      searchSaveStatus.textContent = 'Enter a search model ID first.';
-      searchSaveStatus.style.color = '#ea4335';
-      return;
-    }
+    const model = searchModelSelect.value;
     await chrome.storage.local.set({
-      searchEnabled:  searchEnabled.checked,
+      searchEnabled:  !!model,
       searchModel:    model,
-      searchProvider: searchProviderSel.value,
-      searchApiKey:   searchApiKeyInput.value.trim(),
+      searchProvider: 'groq',
+      searchApiKey:   '',  // always uses primary API key
     });
     // Force client rebuild to pick up new search settings
     await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' }).catch(() => {});
-    searchSaveStatus.textContent = searchEnabled.checked
+    searchSaveStatus.textContent = model
       ? `Search enabled — using ${model}`
       : 'Search disabled.';
     searchSaveStatus.style.color = '#34a853';
@@ -301,10 +290,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateProviderHints(providerSelect.value);
     if (saved.aiApiKey) apiKeyInput.value = saved.aiApiKey;
     // Restore search settings
-    searchEnabled.checked        = !!(saved.searchEnabled);
-    if (saved.searchProvider) searchProviderSel.value = saved.searchProvider;
-    if (saved.searchModel)    searchModelInput.value   = saved.searchModel;
-    if (saved.searchApiKey)   searchApiKeyInput.value  = saved.searchApiKey;
+    if (saved.searchModel) searchModelSelect.value = saved.searchModel;
 
     setupSection.classList.remove('hidden');
     controlSection.classList.add('hidden');
@@ -416,8 +402,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (provider && model) {
       const shortName = model.split('/').pop().replace(/:free$/, '');
-      const searchSuffix = (saved.searchEnabled && saved.searchModel)
-        ? ` + 🔍 ${saved.searchModel.split('/').pop()}`
+      const searchSuffix = saved.searchModel
+        ? ` + search:${saved.searchModel}`
         : '';
       activeModelSpan.textContent = shortName + searchSuffix;
       activeModelSpan.title = `${PROVIDERS[provider]?.name || provider} / ${model}`;
