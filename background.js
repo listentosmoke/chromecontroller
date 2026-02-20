@@ -220,14 +220,30 @@ function extractQuizQuestion(visualMap) {
     if (!match) continue;
     const text = match[1].trim();
     if (text.length < 3) continue;
-    // Skip common UI button labels
+    // Skip common UI button labels and "currently contains"/"select to move" Learnosity phrases
     if (/^(Next|Previous|Back|Submit|Cancel|Close|Save|Check Answer|Review|Finish|Done|OK|Item \d)$/i.test(text)) continue;
+    if (/^(Currently contains|Select to move|Press enter)/i.test(text)) continue;
     texts.push(text);
   }
 
   if (texts.length === 0) return null;
   // First items are typically the question + answer options
   return texts.slice(0, 15).join(' | ');
+}
+
+// ── Stable Question Key (for search deduplication) ──
+// Returns a stable identifier that does NOT change when drag tiles shift,
+// i.e., based on the question number ("4 of 5") not the tile content.
+// This prevents re-searching after each tile placement in drag-and-drop questions.
+function extractQuestionKey(visualMap) {
+  if (!visualMap) return null;
+  // Match "N of M Items" pattern, which is stable across tile changes
+  const itemMatch = visualMap.match(/\b(\d+) of (\d+) Items?\b/i);
+  if (itemMatch) return `item:${itemMatch[1]}/${itemMatch[2]}`;
+  // Fallback: use the first 80 chars of the iframe content header
+  const idx = visualMap.indexOf('=== IFRAME CONTENT');
+  if (idx !== -1) return visualMap.substring(idx, idx + 80);
+  return null;
 }
 
 // ── Visual Map Diffing (token optimization for quiz mode) ──
@@ -406,21 +422,25 @@ async function handleExecuteCommand(command) {
 
       // ── Automatic search: when in quiz mode with search enabled, extract the
       //    question from the iframe and call the search model BEFORE the AI acts.
-      //    This makes search mandatory for every new question (no AI opt-out).
+      //    Uses a STABLE question key (item number) so re-search does NOT fire
+      //    after each drag tile is placed (tile list changes but item number stays same).
       if (executionMode === 'quiz' && aiClient.searchEnabled && !lastSearchResults) {
-        const question = extractQuizQuestion(fullVisualMap);
-        if (question && question !== lastSearchedQuestion) {
-          broadcastLog('info', `Auto-searching: "${question.substring(0, 120)}..."`);
-          broadcastStatus('busy', 'Verifying answer via web search...');
-          try {
-            const searchResult = await aiClient.executeSearch(question, { ...pageContext, visualMap: fullVisualMap });
-            if (searchResult) {
-              lastSearchResults = searchResult;
-              lastSearchedQuestion = question;
-              broadcastLog('info', `Search answer: ${searchResult.substring(0, 300)}`);
+        const questionKey = extractQuestionKey(fullVisualMap);
+        if (questionKey && questionKey !== lastSearchedQuestion) {
+          const question = extractQuizQuestion(fullVisualMap);
+          if (question) {
+            broadcastLog('info', `Auto-searching: "${question.substring(0, 120)}..."`);
+            broadcastStatus('busy', 'Verifying answer via web search...');
+            try {
+              const searchResult = await aiClient.executeSearch(question, { ...pageContext, visualMap: fullVisualMap });
+              if (searchResult) {
+                lastSearchResults = searchResult;
+                lastSearchedQuestion = questionKey;  // store stable key, not tile text
+                broadcastLog('info', `Search answer: ${searchResult.substring(0, 300)}`);
+              }
+            } catch (err) {
+              broadcastLog('error', `Search failed: ${err.message}`);
             }
-          } catch (err) {
-            broadcastLog('error', `Search failed: ${err.message}`);
           }
         }
       }
