@@ -62,41 +62,17 @@
         <summary>Answer Search (optional)</summary>
 
         <div class="field">
-          <label class="checkbox-label">
-            <input type="checkbox" id="search-enabled">
-            Enable web search to verify quiz answers
-          </label>
-          <p class="hint">Uses a separate model (e.g. compound-beta) to look up correct answers before clicking.</p>
+          <label for="search-model-select">Search Model</label>
+          <select id="search-model-select">
+            <option value="">None (disabled)</option>
+            <option value="compound">compound</option>
+            <option value="compound-mini">compound-mini</option>
+          </select>
+          <p class="hint">Automatically verifies quiz answers via Groq web search before clicking.</p>
         </div>
 
-        <div id="search-config-fields">
-          <div class="field">
-            <label for="search-provider-select">Search Provider</label>
-            <select id="search-provider-select">
-              <option value="groq">Groq</option>
-              <option value="openrouter">OpenRouter</option>
-            </select>
-          </div>
-
-          <div class="field">
-            <label for="search-model-input">Search Model</label>
-            <input type="text" id="search-model-input"
-              placeholder="compound-beta  or  groq/compound-beta">
-            <p class="hint">
-              Groq: <code>compound-beta</code> / <code>compound-beta-mini</code><br>
-              OpenRouter: <code>groq/compound-beta</code> / <code>groq/compound-beta-mini</code>
-            </p>
-          </div>
-
-          <div class="field">
-            <label for="search-api-key-input">Search API Key <span class="hint-inline">(blank = use primary key)</span></label>
-            <input type="password" id="search-api-key-input"
-              placeholder="Leave blank to use primary key" autocomplete="off">
-          </div>
-
-          <button id="save-search-btn" class="save-search-btn">Save Search Settings</button>
-          <div id="search-save-status" class="hint" style="margin-top:4px"></div>
-        </div>
+        <button id="save-search-btn" class="save-search-btn">Save</button>
+        <div id="search-save-status" class="hint" style="margin-top:4px"></div>
       </details>
     </section>
 

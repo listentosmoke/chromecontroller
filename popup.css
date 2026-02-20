@@ -461,15 +461,6 @@ h1 {
   background: #1a4a8a;
 }
 
-#search-config-fields input[type="text"],
-#search-config-fields input[type="password"] {
+.settings-group .field select {
   font-size: 12px;
-}
-
-#search-config-fields code {
-  font-size: 11px;
-  background: #0a0a1a;
-  padding: 1px 4px;
-  border-radius: 3px;
-  color: #7ec8e3;
 }
