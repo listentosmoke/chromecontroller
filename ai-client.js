@@ -67,7 +67,7 @@ QUIZ RULES:
 13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time. Use the screenshot to identify what image-based drag tiles depict.
 14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.
 15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.
-16. SEARCH: If search results are provided (=== SEARCH RESULTS ===), use them to verify the correct answer before clicking. If you are genuinely uncertain and no results are present, emit {"type":"search","query":"<exact question> <each answer option>"} as your ONLY action — the results will be returned in the next step so you can then click the correct answer.`;
+16. SEARCH: If search results are provided (=== SEARCH RESULTS ===), use them to verify the correct answer before clicking. For MULTIPLE-CHOICE and FILL-IN-THE-BLANK questions: if search is enabled or you are uncertain, emit {"type":"search","query":"<exact question text> <each answer option>"} as your ONLY action — the results will be returned in the next step so you can then click the correct answer. NEVER search for DRAG-AND-DROP questions — use the screenshot and visual map instead.`;
 
 // ── Vision-capable Groq models (support image_url content) ──
 // These Llama 4 models accept image inputs via the same OpenAI-compatible API.
@@ -93,13 +93,6 @@ export const PROVIDERS = {
     keyHelp: 'https://console.groq.com/keys',
     keyHelpText: 'console.groq.com/keys',
   },
-  openrouter: {
-    name: 'OpenRouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    keyPlaceholder: 'sk-or-...',
-    keyHelp: 'https://openrouter.ai/keys',
-    keyHelpText: 'openrouter.ai/keys',
-  },
 };
 
 // ── Dynamic model fetching ──
@@ -107,8 +100,6 @@ export const PROVIDERS = {
 export async function fetchModels(provider, apiKey) {
   if (provider === 'groq') {
     return await _fetchGroqModels(apiKey);
-  } else if (provider === 'openrouter') {
-    return await _fetchOpenRouterModels(apiKey);
   }
   throw new Error('Unknown provider: ' + provider);
 }
@@ -167,39 +158,6 @@ async function _fetchGroqModels(apiKey) {
   return models;
 }
 
-async function _fetchOpenRouterModels(apiKey) {
-  const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/models`, {
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-    }
-  });
-  if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || 'Failed to fetch models');
-  }
-
-  const data = await response.json();
-  const models = [];
-
-  for (const m of (data.data || [])) {
-    models.push({
-      id: m.id,
-      name: m.name || m.id,
-      contextLength: m.context_length,
-      pricing: m.pricing,
-      isFree: m.pricing?.prompt === '0' && m.pricing?.completion === '0',
-    });
-  }
-
-  // Sort: free models first, then by name
-  models.sort((a, b) => {
-    if (a.isFree && !b.isFree) return -1;
-    if (!a.isFree && b.isFree) return 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  return models;
-}
 
 // ── Unified AI Client ──
 
@@ -219,25 +177,17 @@ export class AIClient {
     this.searchApiKey   = options.searchApiKey   || apiKey;    // defaults to same key
   }
 
-  // ── Search analyst: call the configured search model with a query and return
+  // ── Search analyst: call the configured Groq search model with a query and return
   //    the answer as plain text.  The primary model receives this as context.
-  // Supports:
-  //   • Groq compound-beta / compound-beta-mini  — auto-searches the web natively
-  //   • OpenRouter groq/compound-beta etc.       — same, auto-search built in
-  //   • Any other model                          — uses training knowledge to answer
+  // Supports Groq compound / compound-beta / compound-mini — auto-searches the web natively.
   async executeSearch(query, pageContext) {
     if (!this.searchEnabled || !this.searchModel) return null;
 
-    const provider = this.searchProvider;
-    const apiKey   = this.searchApiKey;
-    const baseUrl  = provider === 'groq'
-      ? PROVIDERS.groq.baseUrl
-      : PROVIDERS.openrouter.baseUrl;
+    const apiKey  = this.searchApiKey;
+    const baseUrl = PROVIDERS.groq.baseUrl;
 
-    // Strip provider prefix if using Groq API directly (e.g. "groq/compound-beta" → "compound-beta")
-    const modelId = provider === 'groq'
-      ? this.searchModel.replace(/^groq\//, '')
-      : this.searchModel;
+    // Strip any provider prefix (e.g. "groq/compound-beta" → "compound-beta")
+    const modelId = this.searchModel.replace(/^groq\//, '');
 
     const systemPrompt =
 `You are a factual web search assistant for a quiz/assessment automation bot.
@@ -274,10 +224,6 @@ Search the web and return the correct factual answer.`;
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${apiKey}`,
     };
-    if (provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'chrome-extension://ai-browser-controller';
-      headers['X-Title']      = 'AI Browser Controller';
-    }
 
     try {
       const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -311,24 +257,14 @@ Search the web and return the correct factual answer.`;
 
   async validateKey() {
     try {
-      if (this.provider === 'groq') {
-        return await this._validateGroqKey();
-      } else if (this.provider === 'openrouter') {
-        return await this._validateOpenRouterKey();
-      }
-      return { success: false, error: 'Unknown provider' };
+      return await this._validateGroqKey();
     } catch (err) {
       return { success: false, error: err.message };
     }
   }
 
   async sendMessage(userMessage, pageContext = null, mode = 'normal') {
-    if (this.provider === 'groq') {
-      return await this._sendGroq(userMessage, pageContext, mode);
-    } else if (this.provider === 'openrouter') {
-      return await this._sendOpenRouter(userMessage, pageContext, mode);
-    }
-    throw new Error('Unknown provider: ' + this.provider);
+    return await this._sendGroq(userMessage, pageContext, mode);
   }
 
   clearHistory() {
@@ -410,7 +346,12 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
   }
 
   async _sendGroq(userMessage, pageContext, mode = 'normal') {
-    const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
+    let systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
+
+    // When search is enabled in quiz mode, instruct the AI to always verify answers
+    if (mode === 'quiz' && this.searchEnabled && this.searchModel) {
+      systemPrompt += `\n\nSEARCH ENABLED (model: ${this.searchModel}): For EVERY multiple-choice and fill-in-the-blank question, you MUST emit a search action FIRST to verify the correct answer. Do NOT click an answer without searching first unless search results are already provided. NEVER search for drag-and-drop questions.`;
+    }
 
     const hasScreenshot = !!(pageContext?.screenshot);
     const needsVision = hasScreenshot || !!(pageContext?.needsVision);
@@ -498,91 +439,6 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
 
     if (!responseText) {
       throw new Error('No response from Groq');
-    }
-
-    this.conversationHistory.push({ role: 'user', content: userMessage });
-    this.conversationHistory.push({ role: 'assistant', content: responseText });
-    this._trimHistory();
-
-    return this._parseResponse(responseText);
-  }
-
-  // ── OpenRouter Implementation (OpenAI-compatible) ──
-
-  async _validateOpenRouterKey() {
-    const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/models`, {
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-      }
-    });
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error?.message || 'Invalid API key');
-    }
-    return { success: true };
-  }
-
-  async _sendOpenRouter(userMessage, pageContext, mode = 'normal') {
-    const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
-    const messages = [
-      { role: 'system', content: systemPrompt }
-    ];
-
-    const recentHistory = this.conversationHistory.slice(-6);
-    for (const entry of recentHistory) {
-      messages.push(entry);
-    }
-
-    if (pageContext) {
-      const content = [];
-
-      let textPart = `Command: ${userMessage}\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
-      if (pageContext.visualMap) {
-        textPart += `\n${pageContext.visualMap}\n`;
-      }
-      content.push({ type: 'text', text: textPart });
-
-      if (pageContext.screenshot) {
-        content.push({
-          type: 'image_url',
-          image_url: { url: `data:image/png;base64,${pageContext.screenshot}` }
-        });
-      }
-
-      messages.push({ role: 'user', content });
-    } else {
-      messages.push({ role: 'user', content: userMessage });
-    }
-
-    const requestBody = {
-      model: this.model,
-      messages,
-      temperature: 0.2,
-      max_tokens: 4096,
-      response_format: { type: 'json_object' },
-    };
-
-    const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'chrome-extension://ai-browser-controller',
-        'X-Title': 'AI Browser Controller',
-      },
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.error?.message || `OpenRouter API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const responseText = data.choices?.[0]?.message?.content;
-
-    if (!responseText) {
-      throw new Error('No response from OpenRouter');
     }
 
     this.conversationHistory.push({ role: 'user', content: userMessage });

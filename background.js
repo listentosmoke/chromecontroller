@@ -706,29 +706,19 @@ async function executeAction(action, tab, mode = 'normal') {
       }, sendOpts);
 
     case 'drag': {
-      // Always use click-click: click the source to select it, then click the
-      // target to place it. This is universally supported (Learnosity, SortableJS,
-      // accessibility frameworks, etc.) without requiring trusted CDP mouse events.
+      // Use content script's drag implementation which dispatches proper
+      // PointerEvents, MouseEvents, and HTML5 DragEvents for broad compatibility
+      // (Learnosity, SortableJS, accessibility frameworks, custom libs).
       const fromSel = action.fromSelector || action.selector;
       const toSel = action.toSelector;
-      broadcastLog('info', `Drag: clicking source "${fromSel}" then target "${toSel}"`);
+      broadcastLog('info', `Drag: ${fromSel} → ${toSel}`);
 
-      // Click the draggable item to select/pick it up
-      await chrome.tabs.sendMessage(tab.id, {
+      const result = await chrome.tabs.sendMessage(tab.id, {
         type: 'EXECUTE_ACTION',
-        action: { type: 'click', selector: fromSel, description: 'Select drag source' }
+        action
       }, sendOpts);
 
-      // Pause to let the framework register the selection
-      await new Promise(r => setTimeout(r, 500));
-
-      // Click the drop target to place the item
-      await chrome.tabs.sendMessage(tab.id, {
-        type: 'EXECUTE_ACTION',
-        action: { type: 'click', selector: toSel, description: 'Click drop target' }
-      }, sendOpts);
-
-      return { success: true, text: `Clicked "${fromSel}" → "${toSel}" (click-to-place)` };
+      return result;
     }
 
     case 'search': {
@@ -738,7 +728,7 @@ async function executeAction(action, tab, mode = 'normal') {
       if (!aiClient.searchEnabled || !aiClient.searchModel) {
         return {
           success: false,
-          text: 'Search not configured. Enable it in Settings and set a search model (e.g. compound-beta).'
+          text: 'Search not configured. Enable it in Settings by selecting a search model.'
         };
       }
       broadcastLog('info', `Searching: "${action.query}" via ${aiClient.searchModel}`);

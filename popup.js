@@ -27,17 +27,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   let loadedModels = [];
 
   // ── Search settings elements ──
-  const searchEnabled     = document.getElementById('search-enabled');
-  const searchProviderSel = document.getElementById('search-provider-select');
-  const searchModelInput  = document.getElementById('search-model-input');
-  const searchApiKeyInput = document.getElementById('search-api-key-input');
+  const searchModelSelect = document.getElementById('search-model-select');
   const saveSearchBtn     = document.getElementById('save-search-btn');
   const searchSaveStatus  = document.getElementById('search-save-status');
 
   // ── Update hints when provider changes ──
 
   function updateProviderHints(provider) {
-    const config = PROVIDERS[provider];
+    const config = PROVIDERS[provider] || PROVIDERS.groq;
     apiKeyInput.placeholder = config.keyPlaceholder;
     keyHintLink.href = config.keyHelp;
     keyHintLink.textContent = config.keyHelpText;
@@ -65,11 +62,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   updateProviderHints(providerSelect.value);
 
-  // Restore search settings
-  if (saved.searchEnabled)  searchEnabled.checked        = true;
-  if (saved.searchProvider) searchProviderSel.value      = saved.searchProvider;
-  if (saved.searchModel)    searchModelInput.value        = saved.searchModel;
-  if (saved.searchApiKey)   searchApiKeyInput.value       = saved.searchApiKey;
+  // Restore search settings — derive model from saved state
+  const savedSearchModel = saved.searchModel || '';
+  if (savedSearchModel && searchModelSelect.querySelector(`option[value="${savedSearchModel}"]`)) {
+    searchModelSelect.value = savedSearchModel;
+  } else if (savedSearchModel) {
+    // Model not in the predefined list — add a custom option
+    const opt = document.createElement('option');
+    opt.value = savedSearchModel;
+    opt.textContent = savedSearchModel;
+    searchModelSelect.appendChild(opt);
+    searchModelSelect.value = savedSearchModel;
+  }
 
   if (saved.aiApiKey && saved.aiModel) {
     // Verify the model is actually usable by doing a quick check
@@ -95,10 +99,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (provider === 'groq' && !key.startsWith('gsk_')) {
       showError('Groq API keys start with "gsk_".');
-      return;
-    }
-    if (provider === 'openrouter' && !key.startsWith('sk-or-')) {
-      showError('OpenRouter API keys start with "sk-or-".');
       return;
     }
 
@@ -135,7 +135,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ── Populate model dropdown from fetched data ──
 
-  function populateModelDropdown(provider, models) {
+  function populateModelDropdown(_provider, models) {
     modelSelect.innerHTML = '';
 
     if (models.length === 0) {
@@ -146,72 +146,40 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    if (provider === 'openrouter') {
-      // Group: free first, then paid
-      const freeModels = models.filter(m => m.isFree);
-      const paidModels = models.filter(m => !m.isFree);
+    // Groq: vision models first (in their own group), then text-only models
+    const visionModels = models.filter(m => m.isVision);
+    const textModels = models.filter(m => !m.isVision);
 
-      if (freeModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Free (${freeModels.length})`;
-        for (const m of freeModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.name;
-          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
-          group.appendChild(opt);
+    if (visionModels.length > 0) {
+      const group = document.createElement('optgroup');
+      group.label = `Vision (${visionModels.length}) — supports images & screenshots`;
+      for (const m of visionModels) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        let label = m.name.replace(' [vision]', '') + ' [vision]';
+        if (m.contextWindow) {
+          label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
         }
-        modelSelect.appendChild(group);
+        opt.textContent = label;
+        group.appendChild(opt);
       }
+      modelSelect.appendChild(group);
+    }
 
-      if (paidModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Paid (${paidModels.length})`;
-        for (const m of paidModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.name;
-          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
-          group.appendChild(opt);
+    if (textModels.length > 0) {
+      const group = document.createElement('optgroup');
+      group.label = `Text (${textModels.length}) — auto-uses vision model when needed`;
+      for (const m of textModels) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        let label = m.name;
+        if (m.contextWindow) {
+          label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
         }
-        modelSelect.appendChild(group);
+        opt.textContent = label;
+        group.appendChild(opt);
       }
-    } else {
-      // Groq: vision models first (in their own group), then text-only models
-      const visionModels = models.filter(m => m.isVision);
-      const textModels = models.filter(m => !m.isVision);
-
-      if (visionModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Vision (${visionModels.length}) — supports images & screenshots`;
-        for (const m of visionModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          let label = m.name.replace(' [vision]', '') + ' [vision]';
-          if (m.contextWindow) {
-            label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
-          }
-          opt.textContent = label;
-          group.appendChild(opt);
-        }
-        modelSelect.appendChild(group);
-      }
-
-      if (textModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Text (${textModels.length}) — auto-uses vision model when needed`;
-        for (const m of textModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          let label = m.name;
-          if (m.contextWindow) {
-            label += ` (${(m.contextWindow / 1000).toFixed(0)}k ctx)`;
-          }
-          opt.textContent = label;
-          group.appendChild(opt);
-        }
-        modelSelect.appendChild(group);
-      }
+      modelSelect.appendChild(group);
     }
 
     modelCount.textContent = `(${models.length} available)`;
@@ -269,21 +237,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Search settings save ──
 
   saveSearchBtn.addEventListener('click', async () => {
-    const model = searchModelInput.value.trim();
-    if (searchEnabled.checked && !model) {
-      searchSaveStatus.textContent = 'Enter a search model ID first.';
-      searchSaveStatus.style.color = '#ea4335';
-      return;
-    }
+    const model = searchModelSelect.value;
+    const enabled = model !== '';
     await chrome.storage.local.set({
-      searchEnabled:  searchEnabled.checked,
+      searchEnabled:  enabled,
       searchModel:    model,
-      searchProvider: searchProviderSel.value,
-      searchApiKey:   searchApiKeyInput.value.trim(),
+      searchProvider: 'groq',
+      searchApiKey:   '',  // always use primary key
     });
     // Force client rebuild to pick up new search settings
     await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' }).catch(() => {});
-    searchSaveStatus.textContent = searchEnabled.checked
+    searchSaveStatus.textContent = enabled
       ? `Search enabled — using ${model}`
       : 'Search disabled.';
     searchSaveStatus.style.color = '#34a853';
@@ -301,10 +265,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateProviderHints(providerSelect.value);
     if (saved.aiApiKey) apiKeyInput.value = saved.aiApiKey;
     // Restore search settings
-    searchEnabled.checked        = !!(saved.searchEnabled);
-    if (saved.searchProvider) searchProviderSel.value = saved.searchProvider;
-    if (saved.searchModel)    searchModelInput.value   = saved.searchModel;
-    if (saved.searchApiKey)   searchApiKeyInput.value  = saved.searchApiKey;
+    const restoredSearchModel = saved.searchModel || '';
+    if (restoredSearchModel && searchModelSelect.querySelector(`option[value="${restoredSearchModel}"]`)) {
+      searchModelSelect.value = restoredSearchModel;
+    } else {
+      searchModelSelect.value = '';
+    }
 
     setupSection.classList.remove('hidden');
     controlSection.classList.add('hidden');
@@ -416,9 +382,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (provider && model) {
       const shortName = model.split('/').pop().replace(/:free$/, '');
-      const searchSuffix = (saved.searchEnabled && saved.searchModel)
-        ? ` + 🔍 ${saved.searchModel.split('/').pop()}`
-        : '';
+      const searchModel = searchModelSelect?.value || '';
+      const searchSuffix = searchModel ? ` + ${searchModel}` : '';
       activeModelSpan.textContent = shortName + searchSuffix;
       activeModelSpan.title = `${PROVIDERS[provider]?.name || provider} / ${model}`;
     }
