@@ -433,7 +433,6 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       { role: 'system', content: systemPrompt }
     ];
 
-    // Add recent history only (keep small for small models)
     const recentHistory = this.conversationHistory.slice(-6);
     for (const entry of recentHistory) {
       messages.push(entry);
@@ -489,6 +488,37 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       const msg = err.error?.message || `Groq API error: ${response.status}`;
       if (msg.includes('does not exist') || msg.includes('not found')) {
         throw new Error(`Model "${this.model}" is not available. Go to Settings, click Load Models, and pick a valid one.`);
+      }
+      // JSON generation failure: context is too long or model is confused.
+      // Clear history and retry ONCE with a minimal prompt so the request has fewer tokens.
+      if (err.error?.code === 'json_validate_failed' ||
+          msg.toLowerCase().includes('failed to generate json') ||
+          msg.toLowerCase().includes('failed to validate json')) {
+        this.conversationHistory = [];  // clear history to shrink context
+        const retryBody = {
+          model: this.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: `Command: ${userMessage}\n\n(Context cleared to fix JSON error — proceed with the task based on the command alone)` }
+          ],
+          temperature: 0.1,
+          max_tokens: 2048,
+          response_format: { type: 'json_object' },
+        };
+        const retryResp = await fetch(`${PROVIDERS.groq.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}` },
+          body: JSON.stringify(retryBody)
+        });
+        if (retryResp.ok) {
+          const retryData = await retryResp.json();
+          const retryText = retryData.choices?.[0]?.message?.content;
+          if (retryText) {
+            this.conversationHistory.push({ role: 'user', content: userMessage });
+            this.conversationHistory.push({ role: 'assistant', content: retryText });
+            return this._parseResponse(retryText);
+          }
+        }
       }
       throw new Error(msg);
     }
@@ -595,8 +625,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
   // ── Helpers ──
 
   _trimHistory() {
-    // Keep history small for small models
-    if (this.conversationHistory.length > 10) {
+    if (this.conversationHistory.length > 12) {
       this.conversationHistory = this.conversationHistory.slice(-6);
     }
   }
