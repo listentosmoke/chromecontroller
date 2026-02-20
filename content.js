@@ -104,9 +104,10 @@
         }
       }
 
-      // Try aria-label
+      // Try aria-label (don't CSS.escape the value — spaces/commas/dots are fine inside quotes)
       if (el.getAttribute('aria-label')) {
-        const sel = `[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
+        const rawLabel = el.getAttribute('aria-label').replace(/"/g, '\\"');
+        const sel = `[aria-label="${rawLabel}"]`;
         if (document.querySelectorAll(sel).length === 1) return sel;
       }
 
@@ -253,7 +254,8 @@
         }
       }
       if (el.getAttribute('aria-label')) {
-        const sel = `[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
+        const rawLabel = el.getAttribute('aria-label').replace(/"/g, '\\"');
+        const sel = `[aria-label="${rawLabel}"]`;
         try { if (document.querySelectorAll(sel).length === 1) return sel; } catch { /* skip */ }
       }
       if (el.dataset && el.dataset.testid) {
@@ -601,23 +603,43 @@
     await sleep(400);
 
     const fromText = from.textContent?.trim().substring(0, 80) || fromSelector;
-    // Snapshot target text BEFORE the drag to detect success
+
+    // Snapshot target state BEFORE the drag so we can detect real success.
+    // Learnosity changes the drop zone aria-label to "Currently contains [X]" on placement.
+    const toAriaBefore = to.getAttribute('aria-label') || '';
     const toTextBefore = to.textContent?.trim() || '';
 
-    // ── Approach 1: Accessibility click-to-select, click-to-place ──
-    // Many frameworks (Learnosity, SortableJS) support an accessible drag pattern:
-    // click the source tile to "pick it up", then click the drop zone to "place it".
-    // The Learnosity aria hint "Select to move response to a response input area"
-    // confirms this pattern is supported. Try it first — it's simpler and more reliable.
-    {
-      const r = from.getBoundingClientRect();
-      const x = r.left + r.width / 2, y = r.top + r.height / 2;
-      from.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: x, clientY: y }));
-      from.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true, clientX: x, clientY: y }));
-      from.dispatchEvent(new MouseEvent('mousedown',  { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-      from.dispatchEvent(new MouseEvent('mouseup',    { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-      from.dispatchEvent(new MouseEvent('click',      { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    function isPlaced() {
+      const aria = to.getAttribute('aria-label') || '';
+      const txt  = to.textContent?.trim() || '';
+      return aria.toLowerCase().includes('currently contains') ||
+             (aria !== toAriaBefore && aria.length > 0) ||
+             (txt !== toTextBefore && txt.length > 0 && !txt.toLowerCase().includes('press enter'));
     }
+
+    // ── Approach 1: Accessibility click-to-select, click-to-place ──
+    // Learnosity supports an accessible drag pattern: click the source tile to
+    // "pick it up", then click the drop zone to "place it".
+    // IMPORTANT: Learnosity attaches its listeners to the INNER element that has
+    // the aria-label (e.g. the span/div labelled "rollover"), NOT the outer
+    // [draggable] container. Find that inner element and click it.
+    const fromInner =
+      from.querySelector('[aria-label]:not([aria-label=""])') ||
+      from.querySelector('[role="button"]') ||
+      from.querySelector('button') ||
+      from;
+
+    {
+      const r = fromInner.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      fromInner.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: x, clientY: y }));
+      fromInner.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true, clientX: x, clientY: y }));
+      fromInner.dispatchEvent(new MouseEvent('mousedown',  { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      fromInner.dispatchEvent(new MouseEvent('mouseup',    { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      fromInner.dispatchEvent(new MouseEvent('click',      { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    }
+    // Also fire native click — triggers trusted-event listeners that ignore synthetic ones
+    try { fromInner.click(); } catch {}
     await sleep(600);
 
     to.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -632,17 +654,17 @@
       to.dispatchEvent(new MouseEvent('mouseup',    { bubbles: true, cancelable: true, clientX: x, clientY: y }));
       to.dispatchEvent(new MouseEvent('click',      { bubbles: true, cancelable: true, clientX: x, clientY: y }));
     }
+    try { to.click(); } catch {}
     await sleep(700);
 
-    // Check if accessibility click worked: target text must have changed to something new
-    const toTextAfterClick = to.textContent?.trim() || '';
-    if (toTextAfterClick !== toTextBefore && toTextAfterClick.length > 0) {
+    if (isPlaced()) {
       hideHighlight();
-      return { success: true, text: `Dragged "${fromText}" → "${toTextAfterClick.substring(0, 80)}"` };
+      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || toSelector;
+      return { success: true, text: `Dragged "${fromText}" → "${label.substring(0, 100)}"` };
     }
 
-    // ── Approach 2: Full pointer + mouse event drag sequence ──
-    // Re-fetch rects (page may have scrolled)
+    // ── Approach 2: Full pointer + mouse + HTML5 DragEvent sequence ──
+    // Re-fetch rects after any scroll from approach 1
     from.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await sleep(300);
 
@@ -690,7 +712,7 @@
       await sleep(70);
     }
 
-    // Hover at target — give the framework time to activate the drop zone (500ms)
+    // Hover at target — give the framework time to activate the drop zone
     to.dispatchEvent(new MouseEvent('mouseenter', { ...evtOpts, clientX: toX, clientY: toY }));
     to.dispatchEvent(new MouseEvent('mouseover',  { ...evtOpts, clientX: toX, clientY: toY }));
     if (dataTransfer) {
@@ -716,8 +738,17 @@
     await sleep(500);
     hideHighlight();
 
-    const toTextFinal = to.textContent?.trim().substring(0, 80) || toSelector;
-    return { success: true, text: `Dragged "${fromText}" → "${toTextFinal}"` };
+    // Real success check: did the drop zone update?
+    if (isPlaced()) {
+      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || toSelector;
+      return { success: true, text: `Dragged "${fromText}" → "${label.substring(0, 100)}"` };
+    }
+
+    // Neither approach placed the tile — report failure so AI can retry with better selectors
+    return {
+      success: false,
+      error: `Drag did not register (zone unchanged). Try using aria-label selectors: fromSelector=[aria-label="...tile label..."] toSelector=[aria-label="Response input area, N out of M. Connected to ..."]`
+    };
   }
 
   async function waitForSelector(selector, timeout = 5000) {
