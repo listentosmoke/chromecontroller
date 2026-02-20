@@ -762,10 +762,31 @@ async function executeAction(action, tab, mode = 'normal') {
       const fromSel = action.fromSelector || action.selector;
       const toSel = action.toSelector;
       broadcastLog('info', `Drag: "${fromSel}" → "${toSel}"`);
-      return await chrome.tabs.sendMessage(tab.id, {
-        type: 'EXECUTE_ACTION',
-        action: { type: 'drag', fromSelector: fromSel, toSelector: toSel }
-      }, sendOpts);
+      const dragAction = { type: 'drag', fromSelector: fromSel, toSelector: toSel };
+
+      // Try the specified frame first (sendOpts has frameId if action included it)
+      let dragResult = await chrome.tabs.sendMessage(tab.id, {
+        type: 'EXECUTE_ACTION', action: dragAction
+      }, sendOpts).catch(e => ({ success: false, error: e.message }));
+
+      // If element not found and no frameId was given, auto-scan all child frames
+      // (AI sometimes omits frameId on drag actions even for iframe content)
+      if (!dragResult?.success && !action.frameId) {
+        const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id }).catch(() => []);
+        for (const frame of frames) {
+          if (frame.frameId === 0) continue; // already tried top frame
+          try {
+            const r = await chrome.tabs.sendMessage(
+              tab.id, { type: 'EXECUTE_ACTION', action: dragAction },
+              { frameId: frame.frameId }
+            );
+            if (r?.success) { dragResult = r; break; }
+            if (!r?.error?.toLowerCase().includes('not found')) { dragResult = r; break; }
+          } catch { /* frame may not have content script, try next */ }
+        }
+      }
+
+      return dragResult;
     }
 
     case 'search': {
