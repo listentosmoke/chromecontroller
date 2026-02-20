@@ -62,7 +62,10 @@ QUIZ RULES:
 10. If a modal says items are unanswered, click Cancel, then answer the current item.
 11. MULTI-ANSWER (checkboxes): Check ONLY the correct options. Uncheck wrong ones that are [CHECKED].
 12. SINGLE-ANSWER (radio): Select exactly ONE correct answer.
-13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags — handle them one at a time. Use the screenshot to identify what image-based drag tiles depict.
+13. DRAG-AND-DROP: Drag ONE item at a time, then add a snapshot to verify it landed. The system pauses after each drag so you can verify. Do NOT batch multiple drags.
+    TARGET SELECTORS: The correct drop zone selector is always [aria-label="Response input area, N out of M. Connected to X."] — NOT the answer text label. Use this exact pattern.
+    SUCCESS CHECK: After the drag snapshot, a placed tile shows "Currently contains [text]" in the drop zone. A drop zone still showing "Response input area" or "Select to move" means the drag did not register — try again.
+    TILE INDICES SHIFT: After each successful drag, remaining tiles shift up in the list. ALWAYS use fresh selectors from the snapshot for subsequent drags — do NOT reuse the same nth-of-type index from before.
 14. DIFF SNAPSHOTS: After step 1, you may receive a PAGE UPDATE (diff). Unchanged sections are omitted but selectors still work. The "Key controls" line lists outer page buttons for reference.
 15. IMAGE QUESTIONS: If the question or answer options appear as images in the screenshot (not as text in the visual map), describe what you see in your "thinking" field and use that to select the correct answer by its position/selector.
 16. SEARCH RESULTS: If search results are provided (=== SEARCH RESULTS ===), they contain the verified correct answer from a web search. ALWAYS use them to select the correct answer. Trust the search results over your own knowledge.`;

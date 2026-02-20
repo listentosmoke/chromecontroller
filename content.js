@@ -337,9 +337,12 @@
         isDraggable;
 
       const text = directText(node);
+      const ariaLabel = node.getAttribute('aria-label');
 
-      // Only record elements that have text content or are interactive
-      if (!text && !isInteractive) continue;
+      // Only record elements that have text content, are interactive, OR have a meaningful aria-label.
+      // aria-label is included because frameworks like Learnosity update it to reflect state
+      // (e.g. drop zones change from "Response input area" to "Currently contains [answer]").
+      if (!text && !isInteractive && !ariaLabel) continue;
 
       const entry = {
         tag: tag.toLowerCase(),
@@ -353,6 +356,7 @@
 
       if (text) entry.text = text.substring(0, 200);
       if (isInteractive) entry.interactive = true;
+      if (ariaLabel && !entry.ariaLabel) entry.ariaLabel = ariaLabel;  // already fetched above
 
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
         entry.inputType = node.type || 'text';
@@ -371,7 +375,6 @@
       }
 
       if (tag === 'A' && node.href) entry.href = node.href;
-      if (node.getAttribute('aria-label')) entry.ariaLabel = node.getAttribute('aria-label');
       if (node.disabled) entry.disabled = true;
       if (isDraggable) entry.draggable = true;
       // Mark drop targets (elements with ondragover/ondrop or role=list/group that accept drops)
@@ -597,57 +600,124 @@
     from.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await sleep(400);
 
+    const fromText = from.textContent?.trim().substring(0, 80) || fromSelector;
+    // Snapshot target text BEFORE the drag to detect success
+    const toTextBefore = to.textContent?.trim() || '';
+
+    // ── Approach 1: Accessibility click-to-select, click-to-place ──
+    // Many frameworks (Learnosity, SortableJS) support an accessible drag pattern:
+    // click the source tile to "pick it up", then click the drop zone to "place it".
+    // The Learnosity aria hint "Select to move response to a response input area"
+    // confirms this pattern is supported. Try it first — it's simpler and more reliable.
+    {
+      const r = from.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      from.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: x, clientY: y }));
+      from.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true, clientX: x, clientY: y }));
+      from.dispatchEvent(new MouseEvent('mousedown',  { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      from.dispatchEvent(new MouseEvent('mouseup',    { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      from.dispatchEvent(new MouseEvent('click',      { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    }
+    await sleep(600);
+
+    to.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(300);
+
+    {
+      const r = to.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      to.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: x, clientY: y }));
+      to.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true, clientX: x, clientY: y }));
+      to.dispatchEvent(new MouseEvent('mousedown',  { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      to.dispatchEvent(new MouseEvent('mouseup',    { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      to.dispatchEvent(new MouseEvent('click',      { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    }
+    await sleep(700);
+
+    // Check if accessibility click worked: target text must have changed to something new
+    const toTextAfterClick = to.textContent?.trim() || '';
+    if (toTextAfterClick !== toTextBefore && toTextAfterClick.length > 0) {
+      hideHighlight();
+      return { success: true, text: `Dragged "${fromText}" → "${toTextAfterClick.substring(0, 80)}"` };
+    }
+
+    // ── Approach 2: Full pointer + mouse event drag sequence ──
+    // Re-fetch rects (page may have scrolled)
+    from.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(300);
+
     const fromRect = from.getBoundingClientRect();
+    to.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(200);
     const toRect = to.getBoundingClientRect();
+
     const fromX = fromRect.left + fromRect.width / 2;
     const fromY = fromRect.top + fromRect.height / 2;
     const toX = toRect.left + toRect.width / 2;
     const toY = toRect.top + toRect.height / 2;
     const evtOpts = { bubbles: true, cancelable: true, view: window };
 
-    // Phase 1: Mouse + Pointer events (works with jQuery UI, SortableJS, Learnosity, custom libs)
-    from.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, clientX: fromX, clientY: fromY, pointerId: 1 }));
-    from.dispatchEvent(new MouseEvent('mousedown', { ...evtOpts, clientX: fromX, clientY: fromY }));
-    await sleep(150);
+    // Scroll source back into view for pointerdown
+    from.scrollIntoView({ behavior: 'instant', block: 'center' });
+    await sleep(200);
+    const fromRect2 = from.getBoundingClientRect();
+    const fx = fromRect2.left + fromRect2.width / 2;
+    const fy = fromRect2.top + fromRect2.height / 2;
 
-    // Simulate smooth movement in 10 steps
-    const steps = 10;
+    from.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, clientX: fx, clientY: fy, pointerId: 1 }));
+    from.dispatchEvent(new MouseEvent('mousedown',     { ...evtOpts, clientX: fx, clientY: fy }));
+    await sleep(250);
+
+    // Start HTML5 drag
+    let dataTransfer;
+    try {
+      dataTransfer = new DataTransfer();
+      from.dispatchEvent(new DragEvent('dragstart', { ...evtOpts, clientX: fx, clientY: fy, dataTransfer }));
+    } catch { dataTransfer = null; }
+    await sleep(100);
+
+    // Smooth movement (15 steps, 70ms each)
+    const steps = 15;
     for (let i = 1; i <= steps; i++) {
-      const x = fromX + (toX - fromX) * (i / steps);
-      const y = fromY + (toY - fromY) * (i / steps);
+      const progress = i / steps;
+      const x = fx + (toX - fx) * progress;
+      const y = fy + (toY - fy) * progress;
       document.dispatchEvent(new PointerEvent('pointermove', { ...evtOpts, clientX: x, clientY: y, pointerId: 1 }));
-      document.dispatchEvent(new MouseEvent('mousemove', { ...evtOpts, clientX: x, clientY: y }));
-      await sleep(50);
+      document.dispatchEvent(new MouseEvent('mousemove',     { ...evtOpts, clientX: x, clientY: y }));
+      if (dataTransfer) {
+        to.dispatchEvent(new DragEvent('dragover', { ...evtOpts, clientX: x, clientY: y, dataTransfer }));
+      }
+      await sleep(70);
     }
 
-    // Fire enter/over on the target
+    // Hover at target — give the framework time to activate the drop zone (500ms)
     to.dispatchEvent(new MouseEvent('mouseenter', { ...evtOpts, clientX: toX, clientY: toY }));
-    to.dispatchEvent(new MouseEvent('mouseover', { ...evtOpts, clientX: toX, clientY: toY }));
-    await sleep(100);
+    to.dispatchEvent(new MouseEvent('mouseover',  { ...evtOpts, clientX: toX, clientY: toY }));
+    if (dataTransfer) {
+      to.dispatchEvent(new DragEvent('dragenter', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+    }
+    for (let i = 0; i < 6; i++) {
+      to.dispatchEvent(new MouseEvent('mousemove', { ...evtOpts, clientX: toX, clientY: toY }));
+      if (dataTransfer) {
+        to.dispatchEvent(new DragEvent('dragover', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+      }
+      await sleep(100);
+    }
 
     // Release
     to.dispatchEvent(new PointerEvent('pointerup', { ...evtOpts, clientX: toX, clientY: toY, pointerId: 1 }));
-    to.dispatchEvent(new MouseEvent('mouseup', { ...evtOpts, clientX: toX, clientY: toY }));
+    to.dispatchEvent(new MouseEvent('mouseup',     { ...evtOpts, clientX: toX, clientY: toY }));
     await sleep(200);
-
-    // Phase 2: HTML5 DragEvent as secondary (native drag-and-drop support)
-    try {
-      const dataTransfer = new DataTransfer();
-      from.dispatchEvent(new DragEvent('dragstart', { ...evtOpts, clientX: fromX, clientY: fromY, dataTransfer }));
-      await sleep(100);
-      to.dispatchEvent(new DragEvent('dragenter', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
-      to.dispatchEvent(new DragEvent('dragover', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
-      await sleep(100);
-      to.dispatchEvent(new DragEvent('drop', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
+    if (dataTransfer) {
+      to.dispatchEvent(new DragEvent('drop',    { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
       from.dispatchEvent(new DragEvent('dragend', { ...evtOpts, clientX: toX, clientY: toY, dataTransfer }));
-    } catch { /* DragEvent may not be supported in all contexts */ }
+    }
 
-    await sleep(400);
+    await sleep(500);
     hideHighlight();
 
-    const fromText = from.textContent?.trim().substring(0, 50) || fromSelector;
-    const toText = to.textContent?.trim().substring(0, 50) || toSelector;
-    return { success: true, text: `Dragged "${fromText}" → "${toText}"` };
+    const toTextFinal = to.textContent?.trim().substring(0, 80) || toSelector;
+    return { success: true, text: `Dragged "${fromText}" → "${toTextFinal}"` };
   }
 
   async function waitForSelector(selector, timeout = 5000) {
