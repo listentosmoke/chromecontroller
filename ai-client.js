@@ -433,8 +433,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       { role: 'system', content: systemPrompt }
     ];
 
-    // Add recent history only (keep small — drag questions accumulate context fast)
-    const recentHistory = this.conversationHistory.slice(-4);
+    const recentHistory = this.conversationHistory.slice(-6);
     for (const entry of recentHistory) {
       messages.push(entry);
     }
@@ -559,7 +558,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       { role: 'system', content: systemPrompt }
     ];
 
-    const recentHistory = this.conversationHistory.slice(-4);
+    const recentHistory = this.conversationHistory.slice(-6);
     for (const entry of recentHistory) {
       messages.push(entry);
     }
@@ -626,9 +625,8 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
   // ── Helpers ──
 
   _trimHistory() {
-    // Keep history small — drag-and-drop questions can accumulate a lot of context
-    if (this.conversationHistory.length > 8) {
-      this.conversationHistory = this.conversationHistory.slice(-4);
+    if (this.conversationHistory.length > 12) {
+      this.conversationHistory = this.conversationHistory.slice(-6);
     }
   }
 

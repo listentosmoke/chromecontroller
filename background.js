@@ -427,6 +427,7 @@ async function handleExecuteCommand(command) {
       if (executionMode === 'quiz' && aiClient.searchEnabled && !lastSearchResults) {
         const questionKey = extractQuestionKey(fullVisualMap);
         if (questionKey && questionKey !== lastSearchedQuestion) {
+          lastSearchedQuestion = questionKey;  // set immediately — prevents re-firing even if search fails
           const question = extractQuizQuestion(fullVisualMap);
           if (question) {
             broadcastLog('info', `Auto-searching: "${question.substring(0, 120)}..."`);
@@ -435,7 +436,6 @@ async function handleExecuteCommand(command) {
               const searchResult = await aiClient.executeSearch(question, { ...pageContext, visualMap: fullVisualMap });
               if (searchResult) {
                 lastSearchResults = searchResult;
-                lastSearchedQuestion = questionKey;  // store stable key, not tile text
                 broadcastLog('info', `Search answer: ${searchResult.substring(0, 300)}`);
               }
             } catch (err) {
