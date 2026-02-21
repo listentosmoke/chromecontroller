@@ -612,8 +612,9 @@
     function isPlaced() {
       const aria = to.getAttribute('aria-label') || '';
       const txt  = to.textContent?.trim() || '';
-      return aria.toLowerCase().includes('currently contains') ||
-             (aria !== toAriaBefore && aria.length > 0) ||
+      // Must detect a CHANGE — not just the presence of "currently contains"
+      // (zone may already be filled from a prior drag)
+      return (aria !== toAriaBefore && aria.length > 0) ||
              (txt !== toTextBefore && txt.length > 0 && !txt.toLowerCase().includes('press enter'));
     }
 
