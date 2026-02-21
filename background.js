@@ -424,9 +424,10 @@ async function handleExecuteCommand(command) {
       //    question from the iframe and call the search model BEFORE the AI acts.
       //    Uses a STABLE question key (item number) so re-search does NOT fire
       //    after each drag tile is placed (tile list changes but item number stays same).
-      if (executionMode === 'quiz' && aiClient.searchEnabled && !lastSearchResults) {
+      if (executionMode === 'quiz' && aiClient.searchEnabled) {
         const questionKey = extractQuestionKey(fullVisualMap);
         if (questionKey && questionKey !== lastSearchedQuestion) {
+          lastSearchResults = null;  // clear old results before new question search
           lastSearchedQuestion = questionKey;  // set immediately — prevents re-firing even if search fails
           const question = extractQuizQuestion(fullVisualMap);
           if (question) {
@@ -455,10 +456,10 @@ async function handleExecuteCommand(command) {
         message = `Continue: ${command}`;
       }
 
-      // Inject search results from the previous step if available
+      // Inject search results on EVERY step until the question changes.
+      // Drag-and-drop questions need the answer mapping on each step (one tile per step).
       if (lastSearchResults) {
-        message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer.`;
-        lastSearchResults = null; // consume; don't re-inject on following steps
+        message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer. For drag-and-drop, match EACH tile to the correct zone based on these results.`;
       }
 
       let response = null;
