@@ -354,7 +354,7 @@ async function handleExecuteCommand(command) {
     await ensureClient();
     broadcastExecutionState(true);
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) throw new Error('No active tab found.');
 
     const MAX_RETRIES = 3;
@@ -451,9 +451,9 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
       } else if (executionMode === 'quiz') {
-        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next, then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
+        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
       } else {
-        message = `Continue: ${command}`;
+        message = `Continue: ${command}\n\nStep ${step} done. IMPORTANT: After opening a new tab or switching tabs, your first action MUST be a snapshot to see what is on that page before clicking anything. Outer-page buttons (navigation, "Start Lesson", "Next", lesson controls) need NO frameId — only elements inside === IFRAME CONTENT (frameId=N) === sections use frameId.`;
       }
 
       // Inject search results on EVERY step until the question changes.
@@ -555,6 +555,25 @@ async function handleExecuteCommand(command) {
           if (result?.result) {
             broadcastLog('info', `Result: ${result.result.substring(0, 500)}`);
           }
+
+          // After opening a new tab, shift execution context to it so subsequent
+          // clicks/snapshots/etc. operate on the new tab instead of the old one.
+          if (action.type === 'tab_new' && result?.tabId) {
+            try {
+              tab = await chrome.tabs.get(result.tabId);
+              broadcastLog('info', `Execution context → new tab (${tab.url || 'about:blank'})`);
+            } catch { /* tab may have been closed */ }
+          }
+          // After switching tabs, update context to whichever tab is now active.
+          if (action.type === 'tab_switch' && result?.success) {
+            try {
+              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (active) {
+                tab = active;
+                broadcastLog('info', `Execution context → tab[${action.index}]: ${tab.title || tab.url}`);
+              }
+            } catch { /* ignore */ }
+          }
         } catch (err) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
@@ -562,8 +581,10 @@ async function handleExecuteCommand(command) {
         // Break the action batch at boundaries that require the AI to re-evaluate:
         //   snapshot / screenshot — page state changed
         //   search               — results need to be injected into the next message
+        //   tab_new / tab_switch — new page loaded; must snapshot before clicking anything
         //   drag (quiz only)     — verify placement before next drag
-        const isBreakPoint = action.type === 'snapshot' || action.type === 'screenshot' || action.type === 'search';
+        const isBreakPoint = action.type === 'snapshot' || action.type === 'screenshot' || action.type === 'search'
+          || action.type === 'tab_new' || action.type === 'tab_switch';
         if (isBreakPoint) {
           if (i < response.actions.length - 1) {
             broadcastLog('info', `Pausing after ${action.type} to re-evaluate (${response.actions.length - i - 1} remaining actions deferred)`);
@@ -665,6 +686,18 @@ async function getPageContext(tab, mode = 'normal') {
   } catch {
     // Screenshot capture failed, continue without it
   }
+
+  // Append open-tab list so the AI can use tab_switch with the correct index
+  // and knows which URLs are already open.
+  try {
+    const allTabs = await chrome.tabs.query({ currentWindow: true });
+    const tabLines = allTabs.map((t, i) => {
+      const marker = t.id === tab.id ? ' ← CURRENT' : '';
+      return `  [${i}] "${t.title || ''}" — ${t.url || 'about:blank'}${marker}`;
+    });
+    const tabSection = `\n=== OPEN TABS ===\n${tabLines.join('\n')}\n=== END OPEN TABS ===`;
+    context.visualMap = (context.visualMap || '') + tabSection;
+  } catch { /* ignore */ }
 
   return context;
 }
