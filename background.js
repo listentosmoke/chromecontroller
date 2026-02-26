@@ -354,7 +354,7 @@ async function handleExecuteCommand(command) {
     await ensureClient();
     broadcastExecutionState(true);
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) throw new Error('No active tab found.');
 
     const MAX_RETRIES = 3;
@@ -555,6 +555,25 @@ async function handleExecuteCommand(command) {
           if (result?.result) {
             broadcastLog('info', `Result: ${result.result.substring(0, 500)}`);
           }
+
+          // After opening a new tab, shift execution context to it so subsequent
+          // clicks/snapshots/etc. operate on the new tab instead of the old one.
+          if (action.type === 'tab_new' && result?.tabId) {
+            try {
+              tab = await chrome.tabs.get(result.tabId);
+              broadcastLog('info', `Execution context → new tab (${tab.url || 'about:blank'})`);
+            } catch { /* tab may have been closed */ }
+          }
+          // After switching tabs, update context to whichever tab is now active.
+          if (action.type === 'tab_switch' && result?.success) {
+            try {
+              const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (active) {
+                tab = active;
+                broadcastLog('info', `Execution context → tab[${action.index}]: ${tab.title || tab.url}`);
+              }
+            } catch { /* ignore */ }
+          }
         } catch (err) {
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
         }
@@ -665,6 +684,18 @@ async function getPageContext(tab, mode = 'normal') {
   } catch {
     // Screenshot capture failed, continue without it
   }
+
+  // Append open-tab list so the AI can use tab_switch with the correct index
+  // and knows which URLs are already open.
+  try {
+    const allTabs = await chrome.tabs.query({ currentWindow: true });
+    const tabLines = allTabs.map((t, i) => {
+      const marker = t.id === tab.id ? ' ← CURRENT' : '';
+      return `  [${i}] "${t.title || ''}" — ${t.url || 'about:blank'}${marker}`;
+    });
+    const tabSection = `\n=== OPEN TABS ===\n${tabLines.join('\n')}\n=== END OPEN TABS ===`;
+    context.visualMap = (context.visualMap || '') + tabSection;
+  } catch { /* ignore */ }
 
   return context;
 }
