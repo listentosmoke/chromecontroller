@@ -23,12 +23,13 @@ A screenshot may be provided alongside the visual map. Use it to understand imag
 RULES:
 1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
-3. For IFRAME elements, include "frameId":N on each action.
-4. After page-changing actions, add a snapshot to see the new state.
-5. Set "done":true when the task is complete.
-6. "actions" array is REQUIRED.
-7. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
-8. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.`;
+3. FRAME TARGETING: Elements in the main === VISUAL PAGE MAP === section are on the OUTER PAGE — use NO frameId. Only elements listed under === IFRAME CONTENT (frameId=N) === need "frameId":N. Navigation buttons ("Start Lesson", "Next", "Submit", lesson controls) are usually on the outer page.
+4. After page-changing actions (navigate, click that loads new page), add a snapshot to see the new state.
+5. After tab_new or tab_switch, ALWAYS do a snapshot as the NEXT action before clicking anything — you need to see what's on the new tab first.
+6. Set "done":true when the task is complete.
+7. "actions" array is REQUIRED.
+8. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
+9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
@@ -52,7 +53,7 @@ A screenshot may be provided alongside the visual map. When IMG elements have no
 QUIZ RULES:
 1. Output ONLY JSON. No markdown, no prose.
 2. Use selectors from the Visual Page Map exactly.
-3. For IFRAME elements, ALWAYS include "frameId":N on each action.
+3. FRAME TARGETING: Elements under === IFRAME CONTENT (frameId=N) === need "frameId":N. Elements in the main === VISUAL PAGE MAP === section (outer page) use NO frameId. Navigation/lesson buttons like "Start Lesson", "Next", "Check Answer", "Submit" are often on the OUTER page — check which section they appear in before adding frameId.
 4. ONE ITEM PER RESPONSE: Handle ONLY the current visible question. Answer it, click Next, add a snapshot. STOP.
 5. Set "done":false after each item. The system re-scans the page automatically.
 6. Set "done":true ONLY when there are NO more items/questions remaining.
