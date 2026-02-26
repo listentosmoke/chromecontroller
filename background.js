@@ -363,6 +363,7 @@ async function handleExecuteCommand(command) {
     let lastFullVisualMap = null; // For diff-based snapshots in quiz mode
     let lastSearchResults = null; // Injected into the next step when search fires
     let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
+    let lastStepFailures = 0;    // Failed actions from the previous step (shown in next message)
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -451,9 +452,15 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
       } else if (executionMode === 'quiz') {
-        message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
+        const failNote = lastStepFailures > 0
+          ? `\n\nWARNING: ${lastStepFailures} action(s) FAILED last step. Re-read the snapshot below and use the EXACT selectors shown — do NOT guess or reuse old selectors.`
+          : '';
+        message = `Continue: ${command}\n\nStep ${step} done.${failNote} Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete and you have confirmed it in the snapshot.`;
       } else {
-        message = `Continue: ${command}\n\nStep ${step} done. IMPORTANT: After opening a new tab or switching tabs, your first action MUST be a snapshot to see what is on that page before clicking anything. Outer-page buttons (navigation, "Start Lesson", "Next", lesson controls) need NO frameId — only elements inside === IFRAME CONTENT (frameId=N) === sections use frameId.`;
+        const failNote = lastStepFailures > 0
+          ? `\n\nWARNING: ${lastStepFailures} action(s) FAILED last step — use EXACT selectors from the snapshot below, do NOT guess. Do NOT set done=true until the task is visibly complete in the snapshot.`
+          : '';
+        message = `Continue: ${command}\n\nStep ${step} done.${failNote} After opening a new tab or switching tabs, your first action MUST be a snapshot to see what is on that page before clicking anything. Outer-page buttons (navigation, "Start Lesson", "Next", lesson controls) need NO frameId — only elements inside === IFRAME CONTENT (frameId=N) === sections use frameId.`;
       }
 
       // Inject search results on EVERY step until the question changes.
@@ -530,6 +537,7 @@ async function handleExecuteCommand(command) {
       broadcastLog('info', response.thinking || 'Planning actions...');
 
       let hitSnapshot = false;
+      let stepFailures = 0;
       for (let i = 0; i < response.actions.length; i++) {
         if (shouldStop) break;
 
@@ -539,6 +547,7 @@ async function handleExecuteCommand(command) {
         try {
           const result = await executeAction(action, tab, executionMode);
           const ok = result?.success !== false;
+          if (!ok) stepFailures++;
           broadcastLog(ok ? 'success' : 'error',
             `[${i + 1}/${response.actions.length}] ${action.type}: ${ok ? 'Done' : (result?.text || 'Failed')}`);
 
@@ -603,11 +612,15 @@ async function handleExecuteCommand(command) {
       }
 
       lastSummary = response.summary || 'Actions completed.';
+      lastStepFailures = stepFailures;
 
-      // Check if AI says the task is done
-      // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
+      // Only honour done=true when the action batch ran to completion.
+      // If we broke early at a snapshot / tab_new / tab_switch / drag, the AI
+      // planned those actions without seeing the resulting page state — it cannot
+      // reliably know the task is done.  Force another round-trip so the AI sees
+      // the current page before declaring completion.
       const isDone = response.done === true || response.done === 'true';
-      if (isDone && !(hitSnapshot && executionMode === 'quiz')) {
+      if (isDone && !hitSnapshot) {
         broadcastLog('info', `Complete: ${lastSummary}`);
         break;
       }
