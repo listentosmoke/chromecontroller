@@ -74,9 +74,295 @@
     }
   }
 
+  function highlightResolvedElement(el, label) {
+    createHighlightOverlay();
+    if (!el) {
+      hideHighlight();
+      return false;
+    }
+
+    const rect = el.getBoundingClientRect();
+    highlightOverlay.style.top = rect.top + 'px';
+    highlightOverlay.style.left = rect.left + 'px';
+    highlightOverlay.style.width = rect.width + 'px';
+    highlightOverlay.style.height = rect.height + 'px';
+    highlightOverlay.style.display = 'block';
+
+    if (label) {
+      highlightLabel.textContent = label;
+      highlightLabel.style.top = Math.max(0, rect.top - 22) + 'px';
+      highlightLabel.style.left = rect.left + 'px';
+      highlightLabel.style.display = 'block';
+    }
+
+    return true;
+  }
+
   function hideHighlight() {
     if (highlightOverlay) highlightOverlay.style.display = 'none';
     if (highlightLabel) highlightLabel.style.display = 'none';
+  }
+
+  const elementRefs = window.__aiElementRefs || (window.__aiElementRefs = {});
+  const reverseRefs = window.__aiElementReverseRefs || (window.__aiElementReverseRefs = new WeakMap());
+  window.__aiElementRefCounter = window.__aiElementRefCounter || 0;
+
+  function getElementRef(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+
+    let ref = reverseRefs.get(el);
+    if (ref && elementRefs[ref]?.deref?.() === el) return ref;
+
+    ref = `ref_${++window.__aiElementRefCounter}`;
+    elementRefs[ref] = new WeakRef(el);
+    reverseRefs.set(el, ref);
+    return ref;
+  }
+
+  function getElementByRef(refId) {
+    const entry = refId ? elementRefs[refId] : null;
+    const el = entry?.deref?.();
+    return el && document.contains(el) ? el : null;
+  }
+
+  function cleanupElementRefs() {
+    for (const [ref, entry] of Object.entries(elementRefs)) {
+      const el = entry?.deref?.();
+      if (!el || !document.contains(el)) delete elementRefs[ref];
+    }
+  }
+
+  function resolveElement(target, label = 'Element') {
+    const refId = typeof target === 'string' && target.startsWith('ref_') ? target : target?.refId;
+    if (refId) {
+      const el = getElementByRef(refId);
+      if (el) return el;
+      throw new Error(`${label} not found for refId: ${refId}. Take a fresh snapshot and use the current refId.`);
+    }
+
+    const selector = typeof target === 'string' ? target : target?.selector;
+    if (!selector) throw new Error(`${label} requires selector or refId.`);
+    const el = document.querySelector(selector);
+    if (!el) throw new Error(`${label} not found: ${selector}`);
+    return el;
+  }
+
+  function refOrSelectorLabel(target) {
+    if (target?.refId) return target.refId;
+    return typeof target === 'string' ? target : target?.selector || '';
+  }
+
+  function elementRole(el) {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit;
+
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const roleMap = {
+      a: 'link',
+      button: 'button',
+      select: 'combobox',
+      textarea: 'textbox',
+      h1: 'heading',
+      h2: 'heading',
+      h3: 'heading',
+      h4: 'heading',
+      h5: 'heading',
+      h6: 'heading',
+      img: 'image',
+      nav: 'navigation',
+      main: 'main',
+      header: 'banner',
+      footer: 'contentinfo',
+      section: 'region',
+      article: 'article',
+      aside: 'complementary',
+      form: 'form',
+      table: 'table',
+      ul: 'list',
+      ol: 'list',
+      li: 'listitem',
+      label: 'label'
+    };
+
+    if (tag === 'input') {
+      if (type === 'submit' || type === 'button' || type === 'reset' || type === 'file') return 'button';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      return 'textbox';
+    }
+
+    return roleMap[tag] || 'generic';
+  }
+
+  function isSensitiveInput(el) {
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+    return type === 'password' ||
+      type === 'hidden' ||
+      autocomplete.includes('password') ||
+      autocomplete.includes('one-time-code') ||
+      autocomplete.includes('cc-');
+  }
+
+  function cleanText(value, max = 120) {
+    return String(value || '')
+      .replace(/[\t\n\r]+/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      .substring(0, max);
+  }
+
+  function ownText(el) {
+    let text = '';
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) text += node.textContent;
+    }
+    return cleanText(text);
+  }
+
+  function accessibleName(el) {
+    if (!el) return '';
+    if (isSensitiveInput(el)) return el.value ? '[value redacted]' : cleanText(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+
+    const attrs = ['aria-label', 'placeholder', 'title', 'alt'];
+    for (const attr of attrs) {
+      const value = cleanText(el.getAttribute(attr));
+      if (value) return value;
+    }
+
+    if (el.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      const labelText = cleanText(label?.innerText || label?.textContent);
+      if (labelText) return labelText;
+    }
+
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (['submit', 'button', 'reset'].includes(type)) return cleanText(el.value);
+      return cleanText(el.value, 80);
+    }
+
+    if (tag === 'select') {
+      const selected = el.options?.[el.selectedIndex];
+      return cleanText(selected?.textContent || '');
+    }
+
+    return cleanText(ownText(el) || el.innerText || el.textContent);
+  }
+
+  function elementIsVisible(el, requireViewport = false) {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (!requireViewport) return true;
+    return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+  }
+
+  function elementIsInteractive(el) {
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role');
+    return ['a', 'button', 'input', 'select', 'textarea', 'summary', 'details'].includes(tag) ||
+      ['button', 'link', 'tab', 'checkbox', 'radio', 'option', 'menuitem', 'combobox', 'textbox'].includes(role) ||
+      el.getAttribute('tabindex') !== null ||
+      el.getAttribute('contenteditable') === 'true' ||
+      el.onclick !== null ||
+      el.draggable === true ||
+      el.getAttribute('draggable') === 'true';
+  }
+
+  function shouldIncludeInAccessibilityTree(el, options) {
+    const tag = el.tagName.toLowerCase();
+    if (['script', 'style', 'meta', 'link', 'title', 'noscript', 'path'].includes(tag)) return false;
+    if (el.id === '__ai-highlight' || el.id === '__ai-highlight-label') return false;
+    if (options.filter !== 'all' && el.getAttribute('aria-hidden') === 'true') return false;
+    if (options.filter !== 'all' && !elementIsVisible(el, options.viewportOnly)) return false;
+    if (options.filter === 'interactive') return elementIsInteractive(el);
+
+    const role = elementRole(el);
+    const name = accessibleName(el);
+    const structural = [
+      'heading', 'navigation', 'main', 'banner', 'contentinfo',
+      'region', 'article', 'complementary', 'form', 'table',
+      'list', 'listitem', 'image'
+    ].includes(role);
+
+    return elementIsInteractive(el) || structural || name.length > 0;
+  }
+
+  function getAccessibilityTree(options = {}) {
+    cleanupElementRefs();
+
+    const settings = {
+      depth: Number.isInteger(options.depth) ? options.depth : 12,
+      maxElements: Number.isInteger(options.maxElements) ? options.maxElements : 500,
+      maxChars: Number.isInteger(options.maxChars) ? options.maxChars : 20000,
+      filter: options.filter || 'all',
+      viewportOnly: options.viewportOnly !== false,
+      refId: options.refId || null
+    };
+
+    let count = 0;
+    const lines = [];
+    const root = settings.refId ? getElementByRef(settings.refId) : document.body;
+    if (!root) {
+      return {
+        error: settings.refId
+          ? `Element with refId "${settings.refId}" not found. Take a fresh snapshot.`
+          : 'Document body is not available.',
+        tree: '',
+        viewport: { width: window.innerWidth, height: window.innerHeight }
+      };
+    }
+
+    function walk(el, depth) {
+      if (!el || count >= settings.maxElements || depth > settings.depth) return;
+      if (el.nodeType !== Node.ELEMENT_NODE) return;
+
+      const include = shouldIncludeInAccessibilityTree(el, settings) || el === root;
+      const nextDepth = include ? depth + 1 : depth;
+
+      if (include) {
+        const refId = getElementRef(el);
+        const role = elementRole(el);
+        const name = accessibleName(el);
+        const parts = [`${'  '.repeat(depth)}${role}`];
+        if (name) parts.push(`"${name.replace(/"/g, '\\"')}"`);
+        parts.push(`[${refId}]`);
+        if (el.tagName.toLowerCase() === 'input' && el.getAttribute('type')) parts.push(`type="${el.getAttribute('type')}"`);
+        if (el.getAttribute('href')) parts.push(`href="${el.getAttribute('href')}"`);
+        if (el.getAttribute('aria-expanded')) parts.push(`expanded="${el.getAttribute('aria-expanded')}"`);
+        if (el.getAttribute('aria-selected')) parts.push(`selected="${el.getAttribute('aria-selected')}"`);
+        if (el.disabled) parts.push('[disabled]');
+        if (!elementIsVisible(el, true)) parts.push('[offscreen]');
+        lines.push(parts.join(' '));
+        count++;
+      }
+
+      for (const child of el.children) {
+        walk(child, nextDepth);
+        if (count >= settings.maxElements) break;
+      }
+    }
+
+    walk(root, 0);
+    let tree = lines.join('\n');
+    if (count >= settings.maxElements) {
+      tree += `\n[truncated at ${settings.maxElements} elements]`;
+    }
+    if (tree.length > settings.maxChars) {
+      tree = `${tree.substring(0, settings.maxChars)}\n[truncated at ${settings.maxChars} chars]`;
+    }
+
+    return {
+      tree,
+      elements: count,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      url: window.location.href,
+      title: document.title
+    };
   }
 
   // Get a simplified DOM representation for the AI to understand the page
@@ -348,6 +634,7 @@
 
       const entry = {
         tag: tag.toLowerCase(),
+        refId: getElementRef(node),
         selector: getSelector(node),
         x: Math.round(rect.left + scrollX),
         y: Math.round(rect.top + scrollY),
@@ -415,6 +702,7 @@
       if (!e.visible) parts.push('[offscreen]');
 
       // Selector
+      parts.push(`ref="${e.refId}"`);
       parts.push(`sel="${e.selector}"`);
 
       // Text content
@@ -443,11 +731,10 @@
   }
 
   // Action executors
-  async function clickElement(selector) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function clickElement(target) {
+    const el = resolveElement(target);
 
-    highlightElement(selector, 'clicking');
+    highlightResolvedElement(el, `clicking ${refOrSelectorLabel(target)}`);
 
     // Scroll into view
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -469,11 +756,10 @@
     return { success: true, text: el.textContent?.substring(0, 100) };
   }
 
-  async function typeText(selector, text, clearFirst = true) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function typeText(target, text, clearFirst = true) {
+    const el = resolveElement(target);
 
-    highlightElement(selector, 'typing');
+    highlightResolvedElement(el, `typing ${refOrSelectorLabel(target)}`);
     el.focus();
 
     if (clearFirst) {
@@ -497,11 +783,10 @@
     return { success: true };
   }
 
-  async function hoverElement(selector) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function hoverElement(target) {
+    const el = resolveElement(target);
 
-    highlightElement(selector, 'hovering');
+    highlightResolvedElement(el, `hovering ${refOrSelectorLabel(target)}`);
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await sleep(200);
 
@@ -516,11 +801,10 @@
     return { success: true };
   }
 
-  async function scrollPage(direction, amount = 300, selector = null) {
-    const target = selector ? document.querySelector(selector) : window;
-    if (selector && !target) throw new Error(`Element not found: ${selector}`);
+  async function scrollPage(direction, amount = 300, selector = null, refId = null) {
+    const target = (selector || refId) ? resolveElement({ selector, refId }) : window;
 
-    const scrollTarget = selector ? target : document.documentElement;
+    const scrollTarget = (selector || refId) ? target : document.documentElement;
 
     const scrollMap = {
       up: { top: -amount, left: 0 },
@@ -541,11 +825,11 @@
     return { success: true };
   }
 
-  function extractData(selector, attribute = 'textContent') {
-    const elements = document.querySelectorAll(selector);
+  function extractData(selector, attribute = 'textContent', refId = null) {
+    const elements = refId ? [resolveElement({ refId })] : Array.from(document.querySelectorAll(selector));
     if (elements.length === 0) throw new Error(`No elements found: ${selector}`);
 
-    const results = Array.from(elements).map(el => {
+    const results = elements.map(el => {
       if (attribute === 'textContent') return el.textContent.trim();
       if (attribute === 'innerHTML') return el.innerHTML;
       return el.getAttribute(attribute);
@@ -576,11 +860,10 @@
     return { success: true };
   }
 
-  async function selectOption(selector, value) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
+  async function selectOption(target, value) {
+    const el = resolveElement(target);
 
-    highlightElement(selector, 'selecting');
+    highlightResolvedElement(el, `selecting ${refOrSelectorLabel(target)}`);
     el.value = value;
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -591,18 +874,16 @@
     return { success: true };
   }
 
-  async function dragElement(fromSelector, toSelector) {
-    const from = document.querySelector(fromSelector);
-    const to = document.querySelector(toSelector);
-    if (!from) throw new Error(`Source element not found: ${fromSelector}`);
-    if (!to) throw new Error(`Target element not found: ${toSelector}`);
+  async function dragElement(fromTarget, toTarget) {
+    const from = resolveElement(fromTarget, 'Source element');
+    const to = resolveElement(toTarget, 'Target element');
 
-    highlightElement(fromSelector, 'dragging');
+    highlightResolvedElement(from, `dragging ${refOrSelectorLabel(fromTarget)}`);
 
     from.scrollIntoView({ behavior: 'smooth', block: 'center' });
     await sleep(400);
 
-    const fromText = from.textContent?.trim().substring(0, 80) || fromSelector;
+    const fromText = from.textContent?.trim().substring(0, 80) || refOrSelectorLabel(fromTarget);
 
     // Snapshot target state BEFORE the drag so we can detect real success.
     // Learnosity changes the drop zone aria-label to "Currently contains [X]" on placement.
@@ -660,7 +941,7 @@
 
     if (isPlaced()) {
       hideHighlight();
-      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || toSelector;
+      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || refOrSelectorLabel(toTarget);
       return { success: true, text: `Dragged "${fromText}" → "${label.substring(0, 100)}"` };
     }
 
@@ -741,7 +1022,7 @@
 
     // Real success check: did the drop zone update?
     if (isPlaced()) {
-      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || toSelector;
+      const label = to.getAttribute('aria-label') || to.textContent?.trim().substring(0, 80) || refOrSelectorLabel(toTarget);
       return { success: true, text: `Dragged "${fromText}" → "${label.substring(0, 100)}"` };
     }
 
@@ -774,7 +1055,8 @@
         url: window.location.href,
         title: document.title,
         dom: getSimplifiedDOM(),
-        visualMap: getVisualPageMap()
+        visualMap: getVisualPageMap(),
+        accessibilityTree: getAccessibilityTree({ viewportOnly: false, maxChars: 18000 }).tree
       };
       sendResponse(context);
       return;
@@ -782,6 +1064,11 @@
 
     if (msg.type === 'GET_VISUAL_MAP') {
       sendResponse({ visualMap: getVisualPageMap() });
+      return;
+    }
+
+    if (msg.type === 'GET_ACCESSIBILITY_TREE') {
+      sendResponse(getAccessibilityTree(msg.options || {}));
       return;
     }
 
@@ -808,28 +1095,29 @@
   async function handleAction(action) {
     switch (action.type) {
       case 'click':
-        return clickElement(action.selector);
+        return clickElement({ selector: action.selector, refId: action.refId });
       case 'type':
-        return typeText(action.selector, action.text, action.clearFirst !== false);
+        return typeText({ selector: action.selector, refId: action.refId }, action.text, action.clearFirst !== false);
       case 'hover':
-        return hoverElement(action.selector);
+        return hoverElement({ selector: action.selector, refId: action.refId });
       case 'scroll':
-        return scrollPage(action.direction, action.amount, action.selector);
+        return scrollPage(action.direction, action.amount, action.selector, action.refId);
       case 'extract':
-        return extractData(action.selector, action.attribute);
+        return extractData(action.selector, action.attribute, action.refId);
       case 'evaluate':
         return evaluateExpression(action.expression);
       case 'keyboard':
         return pressKey(action.key);
       case 'select':
-        return selectOption(action.selector, action.value);
+        return selectOption({ selector: action.selector, refId: action.refId }, action.value);
       case 'drag':
-        return dragElement(action.fromSelector || action.selector, action.toSelector);
+        return dragElement(
+          { selector: action.fromSelector || action.selector, refId: action.fromRefId || action.refId },
+          { selector: action.toSelector, refId: action.toRefId }
+        );
       case 'getDragCoords': {
-        const from = document.querySelector(action.fromSelector);
-        const to = document.querySelector(action.toSelector);
-        if (!from) throw new Error(`Source not found: ${action.fromSelector}`);
-        if (!to) throw new Error(`Target not found: ${action.toSelector}`);
+        const from = resolveElement({ selector: action.fromSelector, refId: action.fromRefId || action.refId }, 'Source');
+        const to = resolveElement({ selector: action.toSelector, refId: action.toRefId }, 'Target');
         // Scroll source into view instantly so its rect is stable
         from.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
         await sleep(300);

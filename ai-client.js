@@ -4,13 +4,15 @@
 const SYSTEM_PROMPT_NORMAL = `You are a browser automation bot. Output ONLY valid JSON.
 
 You see a Visual Page Map of page elements. Each line:
-[*TAG] @(x,y WxH) sel="CSS selector" "text" [state]
-* = interactive | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
+[*TAG] @(x,y WxH) ref="ref_1" sel="CSS selector" "text" [state]
+* = interactive | ref = stable element reference | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
 ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag, search, web_search, inspect_urls, export_data, tab_new, tab_close, tab_switch, tab_list
 Format: {"type":"click","selector":"sel","frameId":N}
+Ref format: {"type":"click","refId":"ref_12","frameId":N}
+Drag ref format: {"type":"drag","fromRefId":"ref_1","toRefId":"ref_2","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 web_search: {"type":"web_search","query":"contractors near Dallas without website listed","maxResults":10} — inspect a search-results page in a background tab without typing into a search engine
@@ -29,8 +31,9 @@ A screenshot may be provided alongside the visual map. Use it to understand imag
 
 CAPABILITY MODEL:
 - You are not just the active tab. You can search the web in a background tab with web_search, inspect many URLs in inactive tabs with inspect_urls, list/switch tabs, extract visible DOM data, and export rows to CSV/JSON/XLS with export_data.
-- Page context may include both a Visual Page Map and DOM intelligence. Use DOM intelligence for metadata, headings, links, forms, controls, visible text, contacts, and page structure. Use the Visual Page Map for exact selectors and spatial interaction.
+- Page context may include a Visual Page Map, Accessibility Tree, and DOM intelligence. Use the Accessibility Tree for semantic page understanding and stable refIds; use DOM intelligence for metadata, headings, links, forms, controls, visible text, contacts, and page structure; use the Visual Page Map for coordinates and spatial interaction.
 - DOM intelligence may include same-page frames. Use frame summaries to discover content hidden inside embedded frames; include frameId in actions only when the Visual Page Map marks an iframe section with that frameId.
+- Prefer refId actions when available because they are more stable than generated CSS selectors. If a refId fails, take a fresh snapshot before trying another target.
 - Prefer high-level/background tools before fragile UI choreography. Use active-page click/type only when the target element is visible and the task truly requires interacting with that page.
 - web_search is for public discovery, lead finding, research, and "find/list/look up" tasks. It avoids typing into search engines and returns filtered result links, not search-engine navigation chrome.
 - inspect_urls is for comparing multiple candidate pages before opening one. It avoids repetitive one-result-at-a-time browsing.
@@ -41,17 +44,17 @@ CAPABILITY MODEL:
 
 RULES:
 1. Output ONLY JSON. No markdown, no prose.
-2. Use selectors from the Visual Page Map exactly.
+2. Use refIds from the Accessibility Tree or Visual Page Map when available. Otherwise use selectors from the Visual Page Map exactly.
 3. FRAME TARGETING: Elements in the main === VISUAL PAGE MAP === section are on the OUTER PAGE — use NO frameId. Only elements listed under === IFRAME CONTENT (frameId=N) === need "frameId":N. Navigation buttons ("Start Lesson", "Next", "Submit", lesson controls) are usually on the outer page.
 4. After page-changing actions (navigate, click that loads new page), add a snapshot to see the new state.
 5. After tab_new or tab_switch, ALWAYS do a snapshot as the NEXT action before clicking anything — you need to see what's on the new tab first.
 6. Set "done":true when the task is complete.
 7. "actions" array is REQUIRED.
-8. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
+8. Elements marked [draggable] can be dragged. Use drag action with fromRefId/toRefId when available, otherwise fromSelector/toSelector.
 9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.
 10. DOM INTELLIGENCE:
    - Prefer DOM intelligence for extracting business details, phone numbers, emails, websites, addresses, links, and form/control semantics.
-   - Prefer Visual Page Map selectors for click/type/select actions.
+   - Prefer Accessibility Tree refIds for click/type/select actions, then Visual Page Map selectors.
    - If DOM intelligence and visual map disagree, trust visible/actionable elements for interaction and DOM text/meta for extraction.
 11. DECISION POLICY BEFORE ACTIONS:
    - Infer user intent first: public discovery/research, private account task, form-fill, navigation, extraction/export, or quiz.
@@ -78,13 +81,15 @@ RULES:
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
 
 You see a Visual Page Map of page elements. Each line:
-[*TAG] @(x,y WxH) sel="CSS selector" "text" [state]
-* = interactive | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
+[*TAG] @(x,y WxH) ref="ref_1" sel="CSS selector" "text" [state]
+* = interactive | ref = stable element reference | sel = CSS selector | [CHECKED]/[unchecked] | options=[...]
 
 Sections marked === IFRAME CONTENT (frameId=N) === require "frameId":N on actions.
 
 ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wait, keyboard, hover, screenshot, describe, drag
 Format: {"type":"click","selector":"sel","frameId":N}
+Ref format: {"type":"click","refId":"ref_12","frameId":N}
+Drag ref format: {"type":"drag","fromRefId":"ref_1","toRefId":"ref_2","frameId":N}
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
@@ -481,6 +486,9 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       if (pageContext.visualMap) {
         textContent += `\n${pageContext.visualMap}\n`;
       }
+      if (pageContext.accessibilityTree) {
+        textContent += `\n=== ACCESSIBILITY TREE ===\n${String(pageContext.accessibilityTree).substring(0, 22000)}\n=== END ACCESSIBILITY TREE ===\n`;
+      }
       if (pageContext.domContext) {
         textContent += `\n=== DOM INTELLIGENCE ===\n${JSON.stringify({
           title: pageContext.domContext.title,
@@ -621,6 +629,9 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       let textPart = `Command: ${userMessage}\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textPart += `\n${pageContext.visualMap}\n`;
+      }
+      if (pageContext.accessibilityTree) {
+        textPart += `\n=== ACCESSIBILITY TREE ===\n${String(pageContext.accessibilityTree).substring(0, 22000)}\n=== END ACCESSIBILITY TREE ===\n`;
       }
       if (pageContext.domContext) {
         textPart += `\n=== DOM INTELLIGENCE ===\n${JSON.stringify({

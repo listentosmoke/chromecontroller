@@ -274,7 +274,7 @@ function buildPublicDiscoverySearchQuery(command) {
 
 function getActionMapLine(action, visualMap) {
   if (!visualMap) return '';
-  const selectors = [action.selector, action.fromSelector, action.toSelector]
+  const selectors = [action.selector, action.fromSelector, action.toSelector, action.refId, action.fromRefId, action.toRefId]
     .filter(Boolean)
     .map(String);
   if (selectors.length === 0) return '';
@@ -372,8 +372,8 @@ function validateActionShape(action) {
   if (!action.type) return 'Action is missing required "type".';
 
   const needsSelector = new Set(['click', 'type', 'hover', 'extract', 'select']);
-  if (needsSelector.has(action.type) && !action.selector) {
-    return `${action.type} action is missing required "selector". Use a selector from the current Visual Page Map, or use web_search/navigate when no DOM target is needed.`;
+  if (needsSelector.has(action.type) && !action.selector && !action.refId) {
+    return `${action.type} action is missing required "selector" or "refId". Use a selector/ref from the current Visual Page Map or Accessibility Tree, or use web_search/navigate when no DOM target is needed.`;
   }
 
   if (action.type === 'type' && (action.text === undefined || action.text === null || String(action.text).length === 0)) {
@@ -401,8 +401,8 @@ function validateActionShape(action) {
   if (action.type === 'export_data' && normalizeExportRows(action).length === 0) {
     return 'export_data action requires non-empty "rows" or "data".';
   }
-  if (action.type === 'drag' && (!(action.fromSelector || action.selector) || !action.toSelector)) {
-    return 'drag action requires "fromSelector" (or selector) and "toSelector".';
+  if (action.type === 'drag' && (!(action.fromSelector || action.selector || action.fromRefId || action.refId) || !(action.toSelector || action.toRefId))) {
+    return 'drag action requires "fromSelector" or "fromRefId" (or selector/refId), and "toSelector" or "toRefId".';
   }
 
   return null;
@@ -1288,6 +1288,12 @@ async function getPageContext(tab, mode = 'normal') {
     // Structured DOM extraction is best effort; visual map still carries the page.
   }
 
+  try {
+    context.accessibilityTree = await collectAllFrameAccessibilityTrees(tab.id);
+  } catch {
+    // Accessibility tree is best effort. DOM intelligence and visual map still carry context.
+  }
+
   // Collect visual maps from ALL frames (top + iframes)
   try {
     context.visualMap = await collectAllFrameVisualMaps(tab.id);
@@ -1415,6 +1421,70 @@ async function collectAllFrameVisualMaps(tabId) {
   }
 
   return merged.trim();
+}
+
+async function collectAllFrameAccessibilityTrees(tabId) {
+  let frames;
+  try {
+    frames = await chrome.webNavigation.getAllFrames({ tabId });
+  } catch {
+    frames = null;
+  }
+
+  if (!frames || frames.length === 0) {
+    const resp = await sendMessageWithTimeout(
+      tabId,
+      { type: 'GET_ACCESSIBILITY_TREE', options: { viewportOnly: false, maxChars: 14000 } },
+      { frameId: 0 },
+      3000
+    );
+    return resp?.tree || '';
+  }
+
+  const contentFrames = frames.filter(f =>
+    f.url && (f.url.startsWith('http://') || f.url.startsWith('https://'))
+  );
+
+  const trees = [];
+
+  for (const frame of contentFrames) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frame.frameId] },
+        files: ['content.js']
+      });
+    } catch { /* restricted or already injected */ }
+
+    const resp = await sendMessageWithTimeout(
+      tabId,
+      { type: 'GET_ACCESSIBILITY_TREE', options: { viewportOnly: false, maxChars: 14000 } },
+      { frameId: frame.frameId },
+      3000
+    );
+
+    if (resp?.tree) {
+      trees.push({
+        frameId: frame.frameId,
+        url: frame.url,
+        isTop: frame.parentFrameId === -1,
+        tree: resp.tree
+      });
+    }
+  }
+
+  if (trees.length === 0) return '';
+  if (trees.length === 1) return trees[0].tree;
+
+  const parts = [];
+  const topFrame = trees.find(t => t.isTop);
+  if (topFrame) {
+    parts.push(`=== ACCESSIBILITY TREE ===\n${topFrame.tree}`);
+  }
+  for (const tree of trees) {
+    if (tree.isTop) continue;
+    parts.push(`=== IFRAME ACCESSIBILITY TREE (frameId=${tree.frameId}) ===\nURL: ${tree.url}\n${tree.tree}`);
+  }
+  return parts.join('\n\n');
 }
 
 async function extractDomIntelligence(tabId, allFrames = false) {
@@ -1620,6 +1690,7 @@ async function inspectOneUrlInBackground(url, index) {
     let visualMap = '';
     let dom = '';
     let domContext = null;
+    let accessibilityTree = '';
 
     try {
       visualMap = await collectAllFrameVisualMaps(createdTab.id);
@@ -1639,6 +1710,10 @@ async function inspectOneUrlInBackground(url, index) {
     try {
       domContext = await extractDomIntelligence(createdTab.id, true);
     } catch { /* structured DOM extraction is best effort */ }
+
+    try {
+      accessibilityTree = await collectAllFrameAccessibilityTrees(createdTab.id);
+    } catch { /* accessibility extraction is best effort */ }
 
     let pageLinks = [];
     try {
@@ -1662,6 +1737,7 @@ async function inspectOneUrlInBackground(url, index) {
       visualMap,
       dom,
       domContext,
+      accessibilityTree,
       pageLinks,
     };
   } catch (err) {
@@ -1710,6 +1786,10 @@ async function inspectUrlsInBackground(urls, maxUrls = 5) {
     if (result.visualMap) {
       lines.push('Visual map:');
       lines.push(result.visualMap.substring(0, 5000));
+    }
+    if (result.accessibilityTree) {
+      lines.push('Accessibility tree:');
+      lines.push(result.accessibilityTree.substring(0, 7000));
     }
     if (result.domContext) {
       lines.push('DOM intelligence:');
@@ -1878,6 +1958,10 @@ async function webSearchInBackground(action) {
   }
   lines.push('Visual map:');
   lines.push((result.visualMap || '').substring(0, 6000));
+  if (result.accessibilityTree) {
+    lines.push('Accessibility tree:');
+    lines.push(result.accessibilityTree.substring(0, 7000));
+  }
   if (result.domContext) {
     lines.push('DOM intelligence:');
     lines.push(JSON.stringify({
@@ -2017,9 +2101,11 @@ async function executeAction(action, tab, mode = 'normal') {
       // PointerEvent + MouseEvent + HTML5 DragEvent sequence. This works with
       // Learnosity, SortableJS, jQuery UI, and custom drag-and-drop frameworks.
       const fromSel = action.fromSelector || action.selector;
+      const fromRefId = action.fromRefId || action.refId;
       const toSel = action.toSelector;
+      const toRefId = action.toRefId;
       broadcastLog('info', `Drag: "${fromSel}" → "${toSel}"`);
-      const dragAction = { type: 'drag', fromSelector: fromSel, toSelector: toSel };
+      const dragAction = { type: 'drag', fromSelector: fromSel, fromRefId, toSelector: toSel, toRefId };
 
       // Try the specified frame first (sendOpts has frameId if action included it)
       let dragResult = await chrome.tabs.sendMessage(tab.id, {
@@ -2109,12 +2195,24 @@ async function executeAction(action, tab, mode = 'normal') {
           }
         }
 
-        return { success: true, text: visualMap };
+        const accessibilityTree = await collectAllFrameAccessibilityTrees(tab.id).catch(() => '');
+        return {
+          success: true,
+          text: accessibilityTree
+            ? `${visualMap}\n\n=== ACCESSIBILITY TREE ===\n${accessibilityTree}`
+            : visualMap
+        };
       }
 
       // Normal mode: quick snapshot, no heavy retries
       const visualMap = await collectAllFrameVisualMaps(tab.id);
-      return { success: true, text: visualMap };
+      const accessibilityTree = await collectAllFrameAccessibilityTrees(tab.id).catch(() => '');
+      return {
+        success: true,
+        text: accessibilityTree
+          ? `${visualMap}\n\n=== ACCESSIBILITY TREE ===\n${accessibilityTree}`
+          : visualMap
+      };
     }
 
     case 'navigate':
@@ -2126,7 +2224,14 @@ async function executeAction(action, tab, mode = 'normal') {
       const screenshot = await captureScreenshot(tab.id);
       // Also collect visual maps from all frames
       const visualMap = await collectAllFrameVisualMaps(tab.id);
-      return { success: true, screenshot, text: visualMap };
+      const accessibilityTree = await collectAllFrameAccessibilityTrees(tab.id).catch(() => '');
+      return {
+        success: true,
+        screenshot,
+        text: accessibilityTree
+          ? `${visualMap}\n\n=== ACCESSIBILITY TREE ===\n${accessibilityTree}`
+          : visualMap
+      };
     }
 
     case 'tab_new':
