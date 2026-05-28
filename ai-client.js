@@ -34,6 +34,7 @@ CAPABILITY MODEL:
 - inspect_urls is for comparing multiple candidate pages before opening one. It avoids repetitive one-result-at-a-time browsing.
 - export_data is for any task that produces leads, tables, records, or structured findings.
 - RUN MEMORY lists searches, URLs, clicks, and names already tried. Treat it as state, not advice.
+- Lead/research tasks should produce a table/list. Use export_data with rows containing name, sourceUrl, platform, phone, website, email, address, notes, and confidence. Use empty strings for unknown fields.
 
 RULES:
 1. Output ONLY JSON. No markdown, no prose.
@@ -50,7 +51,7 @@ RULES:
    - If WEB SEARCH RESULTS or URL INSPECTION RESULTS are already provided, use them before taking new browsing actions.
    - NEVER invent credentials or type into email/username/password/login fields unless the user explicitly asked to log in and provided credentials.
    - If a page appears to be an auth wall (Log In / Sign Up / password fields) and the task is research, avoid login fields. Use public discovery: web_search, public result pages, or inspect_urls.
-   - For discovery tasks, prefer this sequence: (a) use existing WEB SEARCH RESULTS, or web_search if none exist, (b) collect several result URLs, (c) use inspect_urls on several untried URLs at once, (d) extract structured findings, (e) export_data when you have useful rows.
+   - For discovery tasks, prefer this sequence: (a) use existing WEB SEARCH RESULTS, or web_search if none exist, (b) collect several result URLs, (c) use inspect_urls on several untried URLs at once, (d) extract structured findings into rows, (e) export_data the rows. Do not mark done after inspecting without exporting/listing findings.
    - Do NOT navigate to google.com/bing.com and type a search. Use web_search or navigate directly to a search-results URL.
    - Do NOT start public research by navigating to an auth-heavy site homepage/search page. Start with web_search and inspect public result URLs.
 11. MULTITASKING AND DEDUPE:
@@ -58,7 +59,7 @@ RULES:
    - Use inspect_urls to inspect multiple candidate pages before choosing which one to open in the active tab.
    - Do not revisit URLs, page names, or contractors listed in RUN MEMORY. Pick new candidates or broaden the query.
    - After inspect_urls returns URL INSPECTION RESULTS, use those results to decide next actions.
-   - When exporting lead/research data, use export_data with rows of plain objects. Empty website means no website found/listed.
+   - When exporting lead/research data, use export_data with rows of plain objects. Include phone/email/address when visible. Empty website means no website found/listed; notes should explain whether the page was blocked, partial, or confirmed.
 12. TAB SWITCH RULES:
    - You may use tab_switch with one of:
      {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"} OR {"type":"tab_switch","query":"facebook"}.

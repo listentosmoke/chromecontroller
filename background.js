@@ -461,6 +461,18 @@ function getActionDuplicateReason(action, pageContext, runMemory) {
   if (action?.type === 'web_search') {
     const query = String(action.query || '').trim().toLowerCase();
     if (!query) return null;
+    const uninspected = getUninspectedCandidateUrls(runMemory, 5);
+    if (uninspected.length >= 3) {
+      action.type = 'inspect_urls';
+      action.urls = uninspected;
+      action.maxUrls = uninspected.length;
+      delete action.query;
+      delete action.engine;
+      return null;
+    }
+    if (runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
+      return 'You have already inspected candidate URLs. Compile the findings into export_data rows before doing another web_search. Include fields like name, sourceUrl, platform, phone, website, email, address, notes, and confidence.';
+    }
     if (runMemory.searches.has(query)) {
       return `Already searched for "${action.query}". Broaden or change the query instead of repeating it.`;
     }
@@ -527,6 +539,29 @@ function recordActionTarget(action, pageContext, runMemory) {
   }
 }
 
+function addCandidateLinks(links, runMemory) {
+  if (!Array.isArray(links)) return;
+  for (const link of links) {
+    const key = normalizeUrlForMemory(link?.href);
+    if (!key) continue;
+    if (!runMemory.candidates.has(key)) {
+      runMemory.candidates.set(key, {
+        url: link.href,
+        text: String(link.text || '').trim(),
+      });
+    }
+  }
+}
+
+function getUninspectedCandidateUrls(runMemory, limit = 8) {
+  const urls = [];
+  for (const [key, candidate] of runMemory.candidates) {
+    if (!runMemory.urls.has(key)) urls.push(candidate.url);
+    if (urls.length >= limit) break;
+  }
+  return urls;
+}
+
 function addNamesFromRows(rows, runMemory) {
   if (!Array.isArray(rows)) return;
   for (const row of rows) {
@@ -538,13 +573,20 @@ function addNamesFromRows(rows, runMemory) {
 function formatRunMemory(runMemory) {
   const urls = Array.from(runMemory.urls).slice(-12);
   const searches = Array.from(runMemory.searches).slice(-8);
+  const candidates = Array.from(runMemory.candidates.values()).slice(-12);
   const names = Array.from(runMemory.names).slice(-12);
   const notes = runMemory.notes.slice(-6);
   const lines = ['=== RUN MEMORY ==='];
   if (searches.length > 0) lines.push(`Searches already tried: ${searches.join(' | ')}`);
+  if (candidates.length > 0) {
+    lines.push('Candidate result URLs: ' + candidates.map(c => `${c.text ? `${c.text} - ` : ''}${c.url}`).join(' | '));
+  }
   if (urls.length > 0) lines.push(`Tried URLs: ${urls.join(' | ')}`);
   if (names.length > 0) lines.push(`Known names/leads: ${names.join(' | ')}`);
   if (notes.length > 0) lines.push(`Notes: ${notes.join(' | ')}`);
+  if (runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
+    lines.push('Next expected step: compile inspected findings into export_data rows, or inspect fresh candidate URLs if required fields are still missing.');
+  }
   lines.push('Avoid repeating these. Inspect fresh URLs or broaden the query when stuck.');
   lines.push('=== END RUN MEMORY ===');
   return lines.join('\n');
@@ -669,7 +711,16 @@ async function handleExecuteCommand(command) {
     let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
     let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
     let lastInspectionResults = null; // Injected into the next step after inspect_urls
-    const runMemory = { searches: new Set(), urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
+    const runMemory = {
+      searches: new Set(),
+      urls: new Set(),
+      clicks: new Set(),
+      names: new Set(),
+      notes: [],
+      candidates: new Map(),
+      inspectCount: 0,
+      exportCount: 0,
+    };
     const bootstrapPublicDiscovery = commandNeedsPublicDiscoveryBootstrap(command);
 
     if (bootstrapPublicDiscovery) {
@@ -791,14 +842,15 @@ async function handleExecuteCommand(command) {
         message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer. For drag-and-drop, match EACH tile to the correct zone based on these results.`;
       }
       if (lastInspectionResults) {
-        message += `\n\n${lastInspectionResults}\n\nUse these URL inspection results to extract facts, avoid opening pages that are clearly blocked, and choose fresh candidates.`;
+        message += `\n\n${lastInspectionResults}\n\nUse these URL/search inspection results to extract facts. For lead/research tasks, compile rows with fields: name, sourceUrl, platform, phone, website, email, address, notes, confidence. Use export_data once you have inspected candidates; use empty strings for unknown fields and notes for blocked or partial pages.`;
         lastInspectionResults = null;
       }
       if (lastGuardrailNotice) {
         message += `\n\n=== BLOCKED ACTION FEEDBACK ===\n${lastGuardrailNotice}\nChoose a different public-discovery strategy. Do not repeat the blocked login action.\n=== END BLOCKED ACTION FEEDBACK ===`;
         lastGuardrailNotice = null;
       }
-      if (runMemory.searches.size > 0 || runMemory.urls.size > 0 || runMemory.names.size > 0 || runMemory.notes.length > 0) {
+      if (runMemory.searches.size > 0 || runMemory.urls.size > 0 || runMemory.names.size > 0 ||
+          runMemory.notes.length > 0 || runMemory.candidates.size > 0 || runMemory.inspectCount > 0) {
         message += `\n\n${formatRunMemory(runMemory)}`;
       }
 
@@ -922,9 +974,16 @@ async function handleExecuteCommand(command) {
           if (action.type === 'search' && result?.text) {
             lastSearchResults = result.text;
             broadcastLog('info', `Search answer: ${result.text.substring(0, 600)}`);
-          } else if ((action.type === 'inspect_urls' || action.type === 'web_search') && result?.text) {
+          } else if (action.type === 'web_search' && result?.text) {
+            addCandidateLinks(result.data?.links, runMemory);
             lastInspectionResults = result.text;
             broadcastLog('info', result.text.substring(0, 2000));
+          } else if (action.type === 'inspect_urls' && result?.text) {
+            runMemory.inspectCount++;
+            lastInspectionResults = result.text;
+            broadcastLog('info', result.text.substring(0, 2000));
+          } else if (action.type === 'export_data' && result?.success !== false) {
+            runMemory.exportCount++;
           } else if (result?.text && action.type !== 'search') {
             broadcastLog('info', result.text.substring(0, 2000));
           }
@@ -988,6 +1047,12 @@ async function handleExecuteCommand(command) {
       // Check if AI says the task is done
       // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
       const isDone = response.done === true || response.done === 'true';
+      if (isDone && commandLooksLikePublicDiscovery(command) && runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
+        lastGuardrailNotice = 'Do not mark a lead/research task done after inspection without compiling results. Use export_data with rows containing name, sourceUrl, platform, phone, website, email, address, notes, and confidence. Use empty strings for unknown fields and notes for blocked/partial pages.';
+        broadcastLog('info', 'Continuing so inspected findings can be exported.');
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
       if (isDone && !blockedAction && !(hitSnapshot && executionMode === 'quiz')) {
         broadcastLog('info', `Complete: ${lastSummary}`);
         break;
