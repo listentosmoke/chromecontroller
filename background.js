@@ -257,6 +257,30 @@ function commandLooksLikePublicDiscovery(command) {
   return /\b(look up|find|search|research|list|collect|contractors?|businesses?|companies?|pages?|profiles?)\b/i.test(command || '');
 }
 
+function commandLooksLikeLeadResearch(command) {
+  return commandLooksLikePublicDiscovery(command) &&
+    /\b(contractors?|business(?:es)?|companies?|services?|leads?|prospects?|providers?|pages?)\b/i.test(command || '');
+}
+
+function commandRequiresNoWebsite(command) {
+  return /\b(no|without|dont|don't|doesn'?t|not)\b.{0,40}\b(web\s*site|website|url|site)\b|\b(web\s*site|website|url|site)\b.{0,40}\b(no|without|missing|not listed|unlisted|blank)\b/i.test(command || '');
+}
+
+function requestedResultCount(command, fallback = 10) {
+  const text = String(command || '');
+  const patterns = [
+    /\b(?:give|find|list|collect|get)\s+(?:me\s+)?(\d{1,3})\b/i,
+    /\b(\d{1,3})\s+(?:leads?|rows?|results?|businesses?|companies?|contractors?)\b/i
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const count = Number.parseInt(match[1], 10);
+    if (Number.isInteger(count) && count > 0) return Math.min(count, 100);
+  }
+  return fallback;
+}
+
 function commandNeedsPublicDiscoveryBootstrap(command) {
   return commandLooksLikePublicDiscovery(command);
 }
@@ -457,7 +481,15 @@ function getActionMemoryTarget(action, pageContext) {
   return null;
 }
 
-function getActionDuplicateReason(action, pageContext, runMemory) {
+function getActionDuplicateReason(action, pageContext, runMemory, command = '') {
+  if (action?.type === 'export_data' && runMemory?.targetCount) {
+    const rows = normalizeExportRows(action);
+    const qualifiedCount = Math.max(rows.length, runMemory.leadRows.length);
+    if (qualifiedCount < runMemory.targetCount) {
+      return `Requested ${runMemory.targetCount} qualified row(s), but only ${qualifiedCount} are compiled. Continue web_search/inspect_urls instead of exporting early.`;
+    }
+  }
+
   if (action?.type === 'web_search') {
     const query = String(action.query || '').trim().toLowerCase();
     if (!query) return null;
@@ -483,8 +515,15 @@ function getActionDuplicateReason(action, pageContext, runMemory) {
     const urls = Array.isArray(action.urls) ? action.urls : [];
     const freshUrls = [];
     const skippedUrls = [];
+    const rejectedUrls = [];
 
     for (const url of urls) {
+      const rejectReason = classifyCandidateUrl(url, command);
+      if (rejectReason) {
+        rejectedUrls.push(`${rejectReason}: ${url}`);
+        runMemory.rejectedCandidates.push({ url, text: '', reason: rejectReason });
+        continue;
+      }
       const key = normalizeUrlForMemory(url);
       if (!key) continue;
       if (runMemory.urls.has(key)) {
@@ -498,8 +537,11 @@ function getActionDuplicateReason(action, pageContext, runMemory) {
     if (skippedUrls.length > 0) {
       runMemory.notes.push(`Skipped already-inspected URLs: ${skippedUrls.slice(0, 5).join(', ')}`);
     }
+    if (rejectedUrls.length > 0) {
+      runMemory.notes.push(`Rejected non-lead inspection URLs: ${rejectedUrls.slice(0, 5).join(' | ')}`);
+    }
     if (freshUrls.length === 0 && urls.length > 0) {
-      return 'All requested URLs were already tried in this run. Choose different contractor/page candidates or broaden the search query.';
+      return 'No usable fresh URLs remained after removing duplicates and non-lead pages. Choose different business/page candidates or broaden the search query.';
     }
     return null;
   }
@@ -539,9 +581,46 @@ function recordActionTarget(action, pageContext, runMemory) {
   }
 }
 
-function addCandidateLinks(links, runMemory) {
+function classifyCandidateUrl(href, command = '') {
+  if (!href || !/^https?:\/\//i.test(href)) return 'not an http(s) URL';
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    const path = url.pathname.toLowerCase();
+    const leadResearch = commandLooksLikeLeadResearch(command);
+
+    if (/(^|\.)google\.com$|(^|\.)bing\.com$|(^|\.)duckduckgo\.com$|(^|\.)accounts\.google\.com$|(^|\.)support\.google\.com$|(^|\.)labs\.google\.com$/.test(host)) {
+      return 'search-engine/navigation URL';
+    }
+    if (/(^|\.)maps\.google\.com$/.test(host) || (/(^|\.)google\.com$/.test(host) && path.startsWith('/maps'))) {
+      return 'search-engine maps/navigation URL';
+    }
+
+    if (leadResearch && /(^|\.)facebook\.com$|(^|\.)m\.facebook\.com$/.test(host)) {
+      if (/^\/groups?(\/|$)/.test(path)) return 'Facebook group/discussion, not a business page';
+      if (/\/(posts|videos|reels|photos|photo|story)(\/|$)/.test(path)) return 'Facebook content post/media URL, not a business page';
+      if (/\/login|\/recover|\/reg\//.test(path)) return 'Facebook auth URL';
+    }
+
+    return '';
+  } catch {
+    return 'invalid URL';
+  }
+}
+
+function addCandidateLinks(links, runMemory, command = '') {
   if (!Array.isArray(links)) return;
   for (const link of links) {
+    const rejectReason = classifyCandidateUrl(link?.href, command);
+    if (rejectReason) {
+      runMemory.rejectedCandidates.push({
+        url: link?.href || '',
+        text: String(link?.text || '').trim(),
+        reason: rejectReason,
+      });
+      continue;
+    }
+
     const key = normalizeUrlForMemory(link?.href);
     if (!key) continue;
     if (!runMemory.candidates.has(key)) {
@@ -638,10 +717,44 @@ function extractWebsite(pageLinks, sourceUrl) {
   return link?.href || '';
 }
 
-function extractLeadRowFromInspection(result) {
-  if (!result?.success) return null;
+function inspectionUrlKind(sourceUrl) {
+  try {
+    const url = new URL(sourceUrl);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    const path = url.pathname.toLowerCase();
+    if (/(^|\.)google\.com$|(^|\.)maps\.google\.com$|(^|\.)bing\.com$|(^|\.)duckduckgo\.com$/.test(host)) return 'search-chrome';
+    if (/^\/groups?(\/|$)/.test(path)) return 'group';
+    if (/\/(posts|videos|reels|photos|photo|story)(\/|$)/.test(path)) return 'post';
+    if (/\/login|\/recover|\/reg\//.test(path)) return 'auth';
+    return 'page';
+  } catch {
+    return 'invalid';
+  }
+}
+
+function hasContractorEvidence(text, sourceUrl, command = '') {
+  const haystack = `${text || ''}\n${sourceUrl || ''}\n${command || ''}`.toLowerCase();
+  return /\b(contractor|construction|builder|builds?|remodel|renovation|roof(?:er|ing)?|handyman|home repair|repair service|carpentry|carpenter|fencing|fence|deck|drywall|painting|painter|concrete|flooring|landscap(?:e|ing)|plumb(?:er|ing)|electric(?:ian|al)|hvac|masonry|siding|gutter|windows?|doors?)\b/.test(haystack);
+}
+
+function makeRejectedLead(result, reason) {
+  return {
+    name: normalizeLeadName(result?.title, result?.finalUrl || result?.requestedUrl || ''),
+    sourceUrl: result?.finalUrl || result?.requestedUrl || '',
+    title: result?.title || '',
+    reason,
+  };
+}
+
+function extractLeadRowFromInspection(result, command = '') {
+  if (!result?.success) return { row: null, rejected: makeRejectedLead(result, result?.error || 'inspection failed') };
 
   const sourceUrl = result.finalUrl || result.requestedUrl || '';
+  const kind = inspectionUrlKind(sourceUrl);
+  if (['search-chrome', 'group', 'post', 'auth', 'invalid'].includes(kind)) {
+    return { row: null, rejected: makeRejectedLead(result, `rejected ${kind} URL; not a business lead page`) };
+  }
+
   const platform = getPlatformFromUrl(sourceUrl);
   const combinedText = [
     result.title,
@@ -660,6 +773,18 @@ function extractLeadRowFromInspection(result) {
   const address = extractAddress(combinedText);
   const isAuthWall = /\b(Log In|Forgot Account|Email or phone|Password|See more on Facebook)\b/i.test(combinedText) ||
     combinedText.toLowerCase().includes('input[password]');
+  const name = normalizeLeadName(result.title, sourceUrl);
+  const requiresNoWebsite = commandRequiresNoWebsite(command);
+
+  if (requiresNoWebsite && website) {
+    return { row: null, rejected: makeRejectedLead(result, `website listed (${website})`) };
+  }
+  if (!hasContractorEvidence(combinedText, sourceUrl, command)) {
+    return { row: null, rejected: makeRejectedLead(result, 'no contractor/trade evidence in inspected content') };
+  }
+  if (!name || /^(facebook|google maps|maps|log in|loading|untitled)$/i.test(name)) {
+    return { row: null, rejected: makeRejectedLead(result, 'missing usable business name') };
+  }
 
   const notes = [];
   if (!website) notes.push('No external website found/listed in inspected public content.');
@@ -671,8 +796,8 @@ function extractLeadRowFromInspection(result) {
     ? 'low'
     : (phones.length || emails.length || address ? (isAuthWall ? 'medium' : 'high') : 'medium');
 
-  return {
-    name: normalizeLeadName(result.title, sourceUrl),
+  return { row: {
+    name,
     sourceUrl,
     platform,
     phone: phones.join('; '),
@@ -681,14 +806,18 @@ function extractLeadRowFromInspection(result) {
     address,
     notes: notes.join(' '),
     confidence,
-  };
+  }, rejected: null };
 }
 
-function addLeadRowsFromInspectionResults(results, runMemory) {
+function addLeadRowsFromInspectionResults(results, runMemory, command = '') {
   if (!Array.isArray(results)) return [];
   const added = [];
   for (const result of results) {
-    const row = extractLeadRowFromInspection(result);
+    const { row, rejected } = extractLeadRowFromInspection(result, command);
+    if (rejected) {
+      runMemory.rejectedLeads.push(rejected);
+      continue;
+    }
     if (!row?.sourceUrl) continue;
     const key = normalizeUrlForMemory(row.sourceUrl);
     if (!key || runMemory.leadRowUrls.has(key)) continue;
@@ -714,16 +843,27 @@ function formatRunMemory(runMemory) {
   const candidates = Array.from(runMemory.candidates.values()).slice(-12);
   const names = Array.from(runMemory.names).slice(-12);
   const leadRows = runMemory.leadRows.slice(-8);
+  const rejectedCandidates = (runMemory.rejectedCandidates || []).slice(-8);
+  const rejectedLeads = (runMemory.rejectedLeads || []).slice(-8);
   const notes = runMemory.notes.slice(-6);
   const lines = ['=== RUN MEMORY ==='];
+  if (runMemory.targetCount) {
+    lines.push(`Lead target: ${runMemory.leadRows.length}/${runMemory.targetCount}${runMemory.requiresNoWebsite ? ' matching no-website criteria' : ''}. Do not export final CSV before reaching the target unless no fresh candidates remain.`);
+  }
   if (searches.length > 0) lines.push(`Searches already tried: ${searches.join(' | ')}`);
   if (candidates.length > 0) {
     lines.push('Candidate result URLs: ' + candidates.map(c => `${c.text ? `${c.text} - ` : ''}${c.url}`).join(' | '));
+  }
+  if (rejectedCandidates.length > 0) {
+    lines.push('Rejected candidate URLs: ' + rejectedCandidates.map(c => `${c.reason}: ${c.text ? `${c.text} - ` : ''}${c.url}`).join(' | '));
   }
   if (urls.length > 0) lines.push(`Tried URLs: ${urls.join(' | ')}`);
   if (names.length > 0) lines.push(`Known names/leads: ${names.join(' | ')}`);
   if (leadRows.length > 0) {
     lines.push('Compiled lead rows: ' + leadRows.map(r => `${r.name || '(unnamed)'} | phone=${r.phone || ''} | website=${r.website || ''} | source=${r.sourceUrl}`).join(' || '));
+  }
+  if (rejectedLeads.length > 0) {
+    lines.push('Rejected inspected pages: ' + rejectedLeads.map(r => `${r.reason}: ${r.name || r.title || '(unnamed)'} - ${r.sourceUrl}`).join(' || '));
   }
   if (runMemory.exports.length > 0) {
     lines.push('Artifacts exported: ' + runMemory.exports.map(e => e.filename).join(' | '));
@@ -865,9 +1005,13 @@ async function handleExecuteCommand(command) {
       candidates: new Map(),
       leadRows: [],
       leadRowUrls: new Set(),
+      rejectedCandidates: [],
+      rejectedLeads: [],
       exports: [],
       inspectCount: 0,
       exportCount: 0,
+      targetCount: commandLooksLikeLeadResearch(command) ? requestedResultCount(command, 10) : null,
+      requiresNoWebsite: commandRequiresNoWebsite(command),
     };
     const bootstrapPublicDiscovery = commandNeedsPublicDiscoveryBootstrap(command);
 
@@ -878,6 +1022,14 @@ async function handleExecuteCommand(command) {
       const searchResult = await webSearchInBackground({ type: 'web_search', query, maxResults: 15 });
       runMemory.searches.add(query.toLowerCase());
       if (searchResult?.text) {
+        const beforeCandidates = runMemory.candidates.size;
+        const beforeRejected = runMemory.rejectedCandidates.length;
+        addCandidateLinks(searchResult.data?.links, runMemory, command);
+        const accepted = runMemory.candidates.size - beforeCandidates;
+        const rejected = runMemory.rejectedCandidates.length - beforeRejected;
+        if (commandLooksLikeLeadResearch(command)) {
+          broadcastLog('info', `Initial candidate filter: accepted ${accepted}, rejected ${rejected}; target ${runMemory.targetCount || 'n/a'} row(s).`);
+        }
         lastInspectionResults = searchResult.text;
         broadcastLog('info', searchResult.text.substring(0, 2000));
         lastSummary = 'Started with public web search results.';
@@ -886,7 +1038,11 @@ async function handleExecuteCommand(command) {
       }
     }
 
-    const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
+    const maxSteps = () => {
+      if (executionMode === 'quiz') return 25;
+      if (commandLooksLikeLeadResearch(command)) return Math.max(20, Math.min(40, (runMemory.targetCount || 10) * 3));
+      return 15;
+    };
 
     for (let step = 0; step < maxSteps(); step++) {
       if (shouldStop) {
@@ -974,6 +1130,12 @@ async function handleExecuteCommand(command) {
         message = `Command: ${command}\n\nController capabilities available now:\n- web_search(query): background web search for public discovery; use instead of typing into search engines.\n- inspect_urls(urls): inspect several candidate pages in inactive tabs without changing the active page.\n- export_data(rows, format): download structured findings for Excel/Sheets/JSON.\n- Active-page click/type/navigation: use only when a visible page interaction is necessary.\n\nChoose the highest-level reliable tool first.`;
         if (commandLooksLikePublicDiscovery(command)) {
           message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Use web_search first if no WEB SEARCH RESULTS are provided. Do not navigate to a target-site home/login page or to google.com/bing.com to type a query. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
+          if (commandLooksLikeLeadResearch(command)) {
+            message += `\n\nLead target: collect ${runMemory.targetCount || 10} qualified row(s) before final export. Reject search result chrome, maps/navigation pages, discussion groups, posts/media pages, login/recovery pages, duplicate businesses, and pages that do not match the requested business category.`;
+            if (runMemory.requiresNoWebsite) {
+              message += ' This command requires leads without an external website listed; reject rows where an external website is found.';
+            }
+          }
         }
         if (bootstrapPublicDiscovery) {
           message += '\n\nThe controller already performed the required public web_search before this first model turn. Use the provided WEB SEARCH RESULTS now. Do not navigate to target-site home/login/search pages, do not use active-page Google typing, and do not switch tabs looking for a search page.';
@@ -1097,7 +1259,7 @@ async function handleExecuteCommand(command) {
             break;
           }
 
-          const duplicateReason = getActionDuplicateReason(action, pageContext, runMemory);
+          const duplicateReason = getActionDuplicateReason(action, pageContext, runMemory, command);
           if (duplicateReason) {
             lastGuardrailNotice = duplicateReason;
             blockedAction = true;
@@ -1124,22 +1286,40 @@ async function handleExecuteCommand(command) {
             lastSearchResults = result.text;
             broadcastLog('info', `Search answer: ${result.text.substring(0, 600)}`);
           } else if (action.type === 'web_search' && result?.text) {
-            addCandidateLinks(result.data?.links, runMemory);
+            const beforeCandidates = runMemory.candidates.size;
+            const beforeRejected = runMemory.rejectedCandidates.length;
+            addCandidateLinks(result.data?.links, runMemory, command);
+            const accepted = runMemory.candidates.size - beforeCandidates;
+            const rejected = runMemory.rejectedCandidates.length - beforeRejected;
+            if (commandLooksLikeLeadResearch(command)) {
+              broadcastLog('info', `Candidate filter: accepted ${accepted}, rejected ${rejected}; ${getUninspectedCandidateUrls(runMemory, 99).length} fresh URL(s) queued.`);
+            }
             lastInspectionResults = result.text;
             broadcastLog('info', result.text.substring(0, 2000));
           } else if (action.type === 'inspect_urls' && result?.text) {
             runMemory.inspectCount++;
+            const beforeRejectedLeads = runMemory.rejectedLeads.length;
             const addedRows = commandLooksLikePublicDiscovery(command)
-              ? addLeadRowsFromInspectionResults(result.fullResults, runMemory)
+              ? addLeadRowsFromInspectionResults(result.fullResults, runMemory, command)
               : [];
+            const rejectedLeads = runMemory.rejectedLeads.length - beforeRejectedLeads;
+            if (commandLooksLikeLeadResearch(command)) {
+              const targetText = runMemory.targetCount ? ` (${runMemory.leadRows.length}/${runMemory.targetCount} target)` : '';
+              broadcastLog('info', `Lead qualification: accepted ${addedRows.length}, rejected ${rejectedLeads}${targetText}.`);
+              const recentRejected = runMemory.rejectedLeads.slice(-Math.min(rejectedLeads, 5));
+              for (const rejected of recentRejected) {
+                broadcastLog('info', `Rejected lead: ${rejected.reason} — ${rejected.name || rejected.title || rejected.sourceUrl}`);
+              }
+            }
             if (addedRows.length > 0) {
               broadcastLog('info', `Compiled ${addedRows.length} lead row(s) from inspected pages.`);
-              if (runMemory.exportCount === 0) {
+              const shouldAutoExport = !runMemory.targetCount || runMemory.leadRows.length >= runMemory.targetCount;
+              if (runMemory.exportCount === 0 && shouldAutoExport) {
                 const exportResult = await exportDataFile({
                   type: 'export_data',
                   filename: `${slugForFilename(command)}-leads.csv`,
                   format: 'csv',
-                  rows: runMemory.leadRows,
+                  rows: runMemory.targetCount ? runMemory.leadRows.slice(0, runMemory.targetCount) : runMemory.leadRows,
                 });
                 if (exportResult?.success !== false) {
                   runMemory.exportCount++;
@@ -1147,6 +1327,9 @@ async function handleExecuteCommand(command) {
                   broadcastLog('success', exportResult.text);
                   broadcastArtifact(exportResult.data);
                 }
+              } else if (runMemory.targetCount && runMemory.leadRows.length < runMemory.targetCount) {
+                const remaining = runMemory.targetCount - runMemory.leadRows.length;
+                broadcastLog('info', `Not exporting yet: need ${remaining} more qualified lead row(s). Continuing discovery.`);
               }
             }
             lastInspectionResults = result.text;
@@ -1220,6 +1403,13 @@ async function handleExecuteCommand(command) {
       // Check if AI says the task is done
       // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
       const isDone = response.done === true || response.done === 'true';
+      if (isDone && commandLooksLikeLeadResearch(command) && runMemory.targetCount && runMemory.leadRows.length < runMemory.targetCount) {
+        const remaining = runMemory.targetCount - runMemory.leadRows.length;
+        lastGuardrailNotice = `Task requested ${runMemory.targetCount} qualified lead row(s), but only ${runMemory.leadRows.length} are compiled. Need ${remaining} more. Continue with web_search or inspect_urls using fresh candidates; do not finish or export early.`;
+        broadcastLog('info', `Continuing: ${remaining} more qualified lead row(s) needed before export.`);
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
       if (isDone && commandLooksLikePublicDiscovery(command) && runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
         lastGuardrailNotice = runMemory.leadRows.length > 0
           ? 'Lead rows have been compiled but not exported. Use export_data now.'
@@ -1237,6 +1427,25 @@ async function handleExecuteCommand(command) {
       const hadClicks = response.actions.some(a => a.type === 'click');
       const pauseMs = executionMode === 'quiz' && hadClicks ? 2500 : 800;
       await new Promise(r => setTimeout(r, pauseMs));
+    }
+
+    if (commandLooksLikeLeadResearch(command) && runMemory.leadRows.length > 0 && runMemory.exportCount === 0) {
+      const rowsToExport = runMemory.targetCount
+        ? runMemory.leadRows.slice(0, runMemory.targetCount)
+        : runMemory.leadRows;
+      const partial = runMemory.targetCount && rowsToExport.length < runMemory.targetCount;
+      const exportResult = await exportDataFile({
+        type: 'export_data',
+        filename: `${slugForFilename(command)}-${partial ? 'partial-' : ''}leads.csv`,
+        format: 'csv',
+        rows: rowsToExport,
+      });
+      if (exportResult?.success !== false) {
+        runMemory.exportCount++;
+        runMemory.exports.push(exportResult.data);
+        broadcastLog(partial ? 'info' : 'success', `${exportResult.text}${partial ? ` (partial: target was ${runMemory.targetCount})` : ''}`);
+        broadcastArtifact(exportResult.data);
+      }
     }
 
     broadcastStatus('ready', 'Ready');
@@ -1880,7 +2089,8 @@ function isSearchChromeUrl(href, searchUrl) {
     const searchHost = search.hostname.replace(/^www\./, '');
 
     if (host === searchHost) return true;
-    if (/(^|\.)google\.com$/.test(host) && !url.pathname.startsWith('/maps')) return true;
+    if (/(^|\.)google\.com$/.test(host)) return true;
+    if (/(^|\.)maps\.google\.com$/.test(host)) return true;
     if (/(^|\.)bing\.com$/.test(host)) return true;
     if (/(^|\.)duckduckgo\.com$/.test(host)) return true;
     if (/(^|\.)accounts\.google\.com$/.test(host)) return true;

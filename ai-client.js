@@ -24,6 +24,7 @@ tab_switch supports:
   {"type":"tab_switch","query":"facebook"}  // matches tab title or URL
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
+The "thinking" field must be a concise operational log: state intent classification, why you chose the next tool/action, and what you are avoiding due to prior failures or run memory. Do not just say "I will..." repeatedly.
 
 MODE SWITCH: If you detect a quiz, test, assessment, survey, or form with multiple questions to complete, include "mode":"quiz" in your JSON to activate enhanced quiz mode.
 
@@ -68,6 +69,8 @@ RULES:
    - For public research, start with web_search. Do not start by navigating to a target site's home/login page.
    - Use inspect_urls to inspect multiple candidate pages before choosing which one to open in the active tab.
    - Do not revisit URLs, page names, or contractors listed in RUN MEMORY. Pick new candidates or broaden the query.
+   - If RUN MEMORY shows a lead target, keep working until that many qualified rows exist. Do not export or finish early.
+   - Reject search-engine chrome, maps/navigation links, social posts/media, groups/discussions, login/recovery pages, duplicate businesses, and rows that fail explicit user filters.
    - After inspect_urls returns URL INSPECTION RESULTS, use those results to decide next actions.
    - When exporting lead/research data, use export_data with rows of plain objects. Include phone/email/address when visible. Empty website means no website found/listed; notes should explain whether the page was blocked, partial, or confirmed.
 13. TAB SWITCH RULES:
