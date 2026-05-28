@@ -13,7 +13,7 @@ ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wai
 Format: {"type":"click","selector":"sel","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
-web_search: {"type":"web_search","query":"site:facebook.com contractors no website","maxResults":10} — inspect a search-results page in a background tab without typing into Google
+web_search: {"type":"web_search","query":"contractors near Dallas without website listed","maxResults":10} — inspect a search-results page in a background tab without typing into a search engine
 inspect_urls: {"type":"inspect_urls","urls":["https://..."],"maxUrls":5} — inspect multiple public pages in inactive background tabs without changing the current tab
 export_data: {"type":"export_data","filename":"contractors.csv","format":"csv","rows":[{"name":"...","facebookUrl":"...","website":"","notes":"..."}]} — download structured findings for Excel/Sheets
 tab_switch supports:
@@ -30,7 +30,7 @@ A screenshot may be provided alongside the visual map. Use it to understand imag
 CAPABILITY MODEL:
 - You are not just the active tab. You can search the web in a background tab with web_search, inspect many URLs in inactive tabs with inspect_urls, list/switch tabs, extract visible DOM data, and export rows to CSV/JSON/XLS with export_data.
 - Prefer high-level/background tools before fragile UI choreography. Use active-page click/type only when the target element is visible and the task truly requires interacting with that page.
-- web_search is for public discovery, lead finding, research, and "find/list/look up" tasks. It avoids typing into Google/Bing.
+- web_search is for public discovery, lead finding, research, and "find/list/look up" tasks. It avoids typing into search engines and returns filtered result links, not search-engine navigation chrome.
 - inspect_urls is for comparing multiple candidate pages before opening one. It avoids repetitive one-result-at-a-time browsing.
 - export_data is for any task that produces leads, tables, records, or structured findings.
 - RUN MEMORY lists searches, URLs, clicks, and names already tried. Treat it as state, not advice.

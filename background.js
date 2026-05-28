@@ -257,53 +257,19 @@ function commandLooksLikePublicDiscovery(command) {
   return /\b(look up|find|search|research|list|collect|contractors?|businesses?|companies?|pages?|profiles?)\b/i.test(command || '');
 }
 
-const PUBLIC_DISCOVERY_DOMAINS = [
-  { pattern: /\bfacebook\b/i, domain: 'facebook.com', scope: 'site:facebook.com/pages', excludes: '-login -groups -marketplace' },
-  { pattern: /\blinkedin\b/i, domain: 'linkedin.com', scope: 'site:linkedin.com/company OR site:linkedin.com/in', excludes: '-login -jobs' },
-  { pattern: /\binstagram\b/i, domain: 'instagram.com', scope: 'site:instagram.com', excludes: '-login' },
-  { pattern: /\btiktok\b/i, domain: 'tiktok.com', scope: 'site:tiktok.com', excludes: '-login' },
-  { pattern: /\byelp\b/i, domain: 'yelp.com', scope: 'site:yelp.com/biz', excludes: '' },
-  { pattern: /\bgoogle maps?\b/i, domain: 'google.com', scope: 'site:google.com/maps', excludes: '' },
-  { pattern: /\bnextdoor\b/i, domain: 'nextdoor.com', scope: 'site:nextdoor.com', excludes: '-login' },
-];
-
-function getDiscoveryDomainHints(command) {
-  return PUBLIC_DISCOVERY_DOMAINS.filter(item => item.pattern.test(command || ''));
-}
-
 function commandNeedsPublicDiscoveryBootstrap(command) {
   return commandLooksLikePublicDiscovery(command);
 }
 
 function buildPublicDiscoverySearchQuery(command) {
   const text = String(command || '').trim();
-  const hints = getDiscoveryDomainHints(text);
-  const lower = text.toLowerCase();
 
-  let terms = text
+  const terms = text
     .replace(/\b(look up|find|search for|search|research|list|collect)\b/gi, ' ')
-    .replace(/\b(in|on|from)\s+(facebook|linkedin|instagram|tiktok|yelp|nextdoor|google maps?)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
-  if (!terms) terms = text;
-
-  if (/\bcontractors?\b/.test(lower) && !/\bcontractors?\b/i.test(terms)) {
-    terms += ' contractors';
-  }
-
-  const noWebsite = /\b(no|without|missing|not listed)\s+(a\s+)?(web\s*sites?|websites?)\b/i.test(text) ||
-    /\bwithout\s+(a\s+)?websites?\s+listed\b/i.test(text);
-  const noWebsiteTerms = noWebsite
-    ? ' ("no website" OR "website not listed" OR "no web site" OR "website unavailable")'
-    : '';
-
-  const scopes = hints.length > 0
-    ? hints.map(h => h.scope).join(' OR ')
-    : '';
-  const excludes = hints.map(h => h.excludes).filter(Boolean).join(' ');
-  const query = `${scopes ? `${scopes} ` : ''}${terms}${noWebsiteTerms} ${excludes}`.trim();
-  return query.replace(/\s+/g, ' ');
+  return (terms || text).replace(/\s+/g, ' ');
 }
 
 function getActionMapLine(action, visualMap) {
@@ -348,14 +314,24 @@ function validateActionAgainstIntent(action, command, pageContext) {
 
   if (commandLooksLikePublicDiscovery(command) && action.type === 'navigate') {
     const url = normalizeUrlForMemory(action.url);
-    const hintedDomains = getDiscoveryDomainHints(command);
-    for (const hint of hintedDomains) {
-      const escapedDomain = hint.domain.replace(/\./g, '\\.');
-      const rootPattern = new RegExp(`^https://(www\\.)?${escapedDomain}/?(\\?.*)?$`);
-      const authOrSearchPattern = new RegExp(`^https://(www\\.)?${escapedDomain}/(login|signin|auth|search)(/|\\?)`, 'i');
-      if (rootPattern.test(url) || authOrSearchPattern.test(url)) {
-        return `Blocked direct ${hint.domain} home/login/search navigation for a public research task. Start with web_search, then inspect public result URLs.`;
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.replace(/^www\./, '');
+      const label = host.split('.')[0];
+      const isRoot = parsed.pathname === '/' || parsed.pathname === '';
+      const commandNamesDomain = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(command || '');
+
+      if (commandNamesDomain && isRoot) {
+        return `Blocked direct ${host} homepage navigation for a public discovery task. Use web_search, then inspect specific result URLs.`;
       }
+
+      if (commandNamesDomain && /\/(login|signin|auth|search)(\/|\?|$)/i.test(parsed.pathname + parsed.search)) {
+        return `Blocked direct ${host} login/search navigation for a public discovery task. Use web_search, then inspect specific result URLs.`;
+      }
+    } catch { /* non-URL validation handled elsewhere */ }
+
+    if (/\/(login|signin|auth)(\/|\?|$)/i.test(url)) {
+      return 'Blocked auth-page navigation for a public research task. Use web_search, then inspect public result URLs.';
     }
     if (/^https:\/\/(www\.)?google\.com\/?(\?.*)?$/.test(url) ||
         /^https:\/\/(www\.)?bing\.com\/?(\?.*)?$/.test(url)) {
@@ -368,6 +344,12 @@ function validateActionAgainstIntent(action, command, pageContext) {
     if (/^https:\/\/(www\.)?(google|bing)\.com\//.test(currentUrl)) {
       return 'Blocked typing into a search-engine page for public research. Use web_search with the query so search does not depend on fragile DOM typing.';
     }
+  }
+
+  if (commandLooksLikePublicDiscovery(command) &&
+      action.type === 'tab_switch' &&
+      !/\b(tab|switch|current|open)\b/i.test(command || '')) {
+    return 'Blocked tab switching during public discovery because existing tabs may be stale. Use web_search and inspect_urls unless the user explicitly asks to use open tabs.';
   }
 
   if (!pageLooksLikeAuthWall(pageContext)) return null;
@@ -1237,6 +1219,19 @@ async function inspectOneUrlInBackground(url, index) {
       dom = domResponse?.dom || '';
     } catch { /* not every page allows DOM inspection */ }
 
+    let pageLinks = [];
+    try {
+      const [{ result: extractedLinks }] = await chrome.scripting.executeScript({
+        target: { tabId: createdTab.id },
+        func: () => Array.from(document.querySelectorAll('a[href]')).slice(0, 300).map(a => ({
+          text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
+          href: a.href,
+          ariaLabel: a.getAttribute('aria-label') || '',
+        }))
+      });
+      pageLinks = Array.isArray(extractedLinks) ? extractedLinks : [];
+    } catch { /* link extraction is best effort */ }
+
     return {
       success: true,
       index,
@@ -1245,6 +1240,7 @@ async function inspectOneUrlInBackground(url, index) {
       title: tabInfo.title || '',
       visualMap,
       dom,
+      pageLinks,
     };
   } catch (err) {
     return {
@@ -1319,42 +1315,128 @@ function buildSearchUrl(query, engine = 'google') {
   if ((engine || '').toLowerCase() === 'bing') {
     return `https://www.bing.com/search?q=${encoded}`;
   }
+  if ((engine || '').toLowerCase() === 'duckduckgo') {
+    return `https://duckduckgo.com/html/?q=${encoded}`;
+  }
   return `https://www.google.com/search?q=${encoded}&udm=14`;
 }
 
-function extractLinksFromVisualMap(visualMap, maxLinks = 20) {
-  if (!visualMap) return [];
+function getSearchEngines(engine) {
+  if (engine) return [engine];
+  return ['google', 'bing', 'duckduckgo'];
+}
+
+function unwrapSearchResultUrl(href) {
+  if (!href) return '';
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./, '');
+
+    if (host.endsWith('google.com') && url.pathname === '/url' && url.searchParams.get('q')) {
+      return url.searchParams.get('q');
+    }
+
+    if (host.endsWith('duckduckgo.com') && url.searchParams.get('uddg')) {
+      return url.searchParams.get('uddg');
+    }
+
+    if (host.endsWith('bing.com') && url.searchParams.get('u')) {
+      try {
+        let decoded = atob(url.searchParams.get('u'));
+        decoded = decoded.replace(/^a1/, '');
+        if (/^https?:\/\//i.test(decoded)) return decoded;
+      } catch { /* use original */ }
+    }
+
+    return href;
+  } catch {
+    return href;
+  }
+}
+
+function isSearchChromeUrl(href, searchUrl) {
+  try {
+    const url = new URL(href);
+    const search = new URL(searchUrl);
+    const host = url.hostname.replace(/^www\./, '');
+    const searchHost = search.hostname.replace(/^www\./, '');
+
+    if (host === searchHost) return true;
+    if (/(^|\.)google\.com$/.test(host) && !url.pathname.startsWith('/maps')) return true;
+    if (/(^|\.)bing\.com$/.test(host)) return true;
+    if (/(^|\.)duckduckgo\.com$/.test(host)) return true;
+    if (/(^|\.)accounts\.google\.com$/.test(host)) return true;
+    if (/(^|\.)support\.google\.com$/.test(host)) return true;
+    if (/(^|\.)labs\.google\.com$/.test(host)) return true;
+    if (/(^|\.)microsoft\.com$/.test(host)) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function normalizeSearchResultLinks(rawLinks, searchUrl, maxLinks = 20) {
   const links = [];
   const seen = new Set();
-  for (const line of visualMap.split('\n')) {
-    const href = extractLineHref(line);
-    if (!href || seen.has(href)) continue;
-    const text = extractLineText(line);
+
+  for (const raw of Array.isArray(rawLinks) ? rawLinks : []) {
+    const href = unwrapSearchResultUrl(raw.href);
+    if (!href || !/^https?:\/\//i.test(href)) continue;
+    if (isSearchChromeUrl(href, searchUrl)) continue;
+
+    const key = normalizeUrlForMemory(href);
+    if (!key || seen.has(key)) continue;
+
+    const text = String(raw.text || raw.ariaLabel || '').replace(/\s+/g, ' ').trim();
     links.push({ text, href });
-    seen.add(href);
+    seen.add(key);
     if (links.length >= maxLinks) break;
   }
+
   return links;
 }
 
 async function webSearchInBackground(action) {
   const query = action.query || '';
-  const url = buildSearchUrl(query, action.engine);
-  const result = await inspectOneUrlInBackground(url, 1);
-  if (!result.success) {
-    return { success: false, text: `Search failed for "${query}": ${result.error}` };
+  const engines = getSearchEngines(action.engine);
+  const attempts = [];
+  let chosen = null;
+
+  for (const engine of engines) {
+    const url = buildSearchUrl(query, engine);
+    const result = await inspectOneUrlInBackground(url, attempts.length + 1);
+    const links = result.success
+      ? normalizeSearchResultLinks(result.pageLinks, url, action.maxResults || 20)
+      : [];
+    attempts.push({ engine, url, result, links });
+
+    if (links.length > 0 || action.engine) {
+      chosen = attempts[attempts.length - 1];
+      break;
+    }
   }
 
-  const links = extractLinksFromVisualMap(result.visualMap, action.maxResults || 20);
+  if (!chosen) chosen = attempts[attempts.length - 1];
+  if (!chosen?.result?.success) {
+    return { success: false, text: `Search failed for "${query}": ${chosen?.result?.error || 'no search engines returned a page'}` };
+  }
+
+  const { result, links, url, engine } = chosen;
   const lines = ['=== WEB SEARCH RESULTS ==='];
   lines.push(`Query: ${query}`);
+  lines.push(`Engine: ${engine}`);
   lines.push(`Search URL: ${url}`);
   lines.push(`Title: ${result.title}`);
+  if (attempts.length > 1) {
+    lines.push(`Engines tried: ${attempts.map(a => `${a.engine} (${a.links.length} result links)`).join(', ')}`);
+  }
   if (links.length > 0) {
     lines.push('Links:');
     for (const [index, link] of links.entries()) {
       lines.push(`[${index + 1}] ${link.text || '(no title)'} - ${link.href}`);
     }
+  } else {
+    lines.push('Links: none found after filtering search-engine UI links.');
   }
   lines.push('Visual map:');
   lines.push((result.visualMap || '').substring(0, 6000));
@@ -1367,7 +1449,7 @@ async function webSearchInBackground(action) {
   return {
     success: true,
     text: lines.join('\n'),
-    data: { query, url, links },
+    data: { query, engine, url, links, attempts: attempts.map(a => ({ engine: a.engine, url: a.url, linkCount: a.links.length })) },
   };
 }
 
