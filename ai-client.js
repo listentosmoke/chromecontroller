@@ -13,6 +13,10 @@ ACTIONS: click, type, select, extract, evaluate, snapshot, navigate, scroll, wai
 Format: {"type":"click","selector":"sel","frameId":N}
 type: add "text","clearFirst" | select: add "value" | navigate: add "url" | evaluate: add "expression"
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
+tab_switch supports:
+  {"type":"tab_switch","index":N}
+  {"type":"tab_switch","direction":"next|prev"}
+  {"type":"tab_switch","query":"facebook"}  // matches tab title or URL
 
 OUTPUT: {"thinking":"plan","actions":[...],"done":false,"summary":"what you did"}
 
@@ -37,8 +41,9 @@ RULES:
    - For discovery tasks, prefer this sequence: (a) open a search engine, (b) search "<topic> <site>", (c) open matching result links, (d) inspect results and extract.
 11. TAB SWITCH RULES:
    - You may use tab_switch with one of:
-     {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"}.
+     {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"} OR {"type":"tab_switch","query":"facebook"}.
    - If user says "switch to another tab" and no index is provided, use {"type":"tab_switch","direction":"next"}.
+   - If user names a destination (e.g., "Switch to the Facebook tab"), use {"type":"tab_switch","query":"facebook"}.
    - Use the === OPEN TABS === list to pick explicit indexes when the user asks for a specific tab.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──

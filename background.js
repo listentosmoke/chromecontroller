@@ -925,11 +925,26 @@ async function executeAction(action, tab, mode = 'normal') {
     case 'tab_switch':
       const allTabs = await chrome.tabs.query({ currentWindow: true });
       const currentIndex = allTabs.findIndex(t => t.active);
+      const normalize = (v) => String(v || '').toLowerCase();
+      const query = normalize(action.query || action.title || action.urlContains || action.match);
 
       let targetIndex = Number.isInteger(action.index) ? action.index : null;
       if (targetIndex === null && typeof action.index === 'string' && action.index.trim() !== '') {
         const parsed = Number.parseInt(action.index, 10);
         if (Number.isInteger(parsed)) targetIndex = parsed;
+      }
+
+      // If model/user provided a destination query (e.g. "facebook"), match title/URL.
+      if (targetIndex === null && query) {
+        const start = currentIndex >= 0 ? currentIndex + 1 : 0;
+        for (let step = 0; step < allTabs.length; step++) {
+          const i = (start + step) % allTabs.length;
+          const t = allTabs[i];
+          if (normalize(t.title).includes(query) || normalize(t.url).includes(query)) {
+            targetIndex = i;
+            break;
+          }
+        }
       }
 
       if (targetIndex === null) {
