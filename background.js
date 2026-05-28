@@ -647,12 +647,16 @@ function extractLeadRowFromInspection(result) {
     result.title,
     result.visualMap,
     result.dom,
+    result.domContext?.text,
+    ...(result.domContext?.headings || []).map(h => h.text),
+    ...(result.domContext?.links || []).map(l => `${l.text || ''} ${l.href || ''}`),
+    ...(result.domContext?.controls || []).map(c => `${c.text || ''} ${c.ariaLabel || ''} ${c.placeholder || ''}`),
     ...(Array.isArray(result.pageLinks) ? result.pageLinks.map(l => `${l.text || ''} ${l.href || ''}`) : [])
   ].join('\n');
 
-  const phones = uniqueMatches(combinedText, /(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g, 3);
-  const emails = uniqueMatches(combinedText, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 3);
-  const website = extractWebsite(result.pageLinks, sourceUrl);
+  const phones = [...new Set([...(result.domContext?.contacts?.phones || []), ...uniqueMatches(combinedText, /(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g, 3)])].slice(0, 3);
+  const emails = [...new Set([...(result.domContext?.contacts?.emails || []), ...uniqueMatches(combinedText, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 3)])].slice(0, 3);
+  const website = extractWebsite([...(result.domContext?.links || []), ...(result.pageLinks || [])], sourceUrl);
   const address = extractAddress(combinedText);
   const isAuthWall = /\b(Log In|Forgot Account|Email or phone|Password|See more on Facebook)\b/i.test(combinedText) ||
     combinedText.toLowerCase().includes('input[password]');
@@ -1274,6 +1278,12 @@ async function getPageContext(tab, mode = 'normal') {
     context.dom = '[Could not inspect page DOM — may be a restricted page]';
   }
 
+  try {
+    context.domContext = await extractDomIntelligence(tab.id);
+  } catch {
+    // Structured DOM extraction is best effort; visual map still carries the page.
+  }
+
   // Collect visual maps from ALL frames (top + iframes)
   try {
     context.visualMap = await collectAllFrameVisualMaps(tab.id);
@@ -1403,6 +1413,129 @@ async function collectAllFrameVisualMaps(tabId) {
   return merged.trim();
 }
 
+async function extractDomIntelligence(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const clean = (value, max = 500) => String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, max);
+
+      const selectorFor = (el) => {
+        if (!el || !el.tagName) return '';
+        if (el.id) return `#${CSS.escape(el.id)}`;
+        const aria = el.getAttribute('aria-label');
+        if (aria) {
+          const sel = `[aria-label="${aria.replace(/"/g, '\\"')}"]`;
+          try { if (document.querySelectorAll(sel).length === 1) return sel; } catch {}
+        }
+        const testId = el.getAttribute('data-testid');
+        if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+        const name = el.getAttribute('name');
+        if (name) {
+          const sel = `[name="${CSS.escape(name)}"]`;
+          try { if (document.querySelectorAll(sel).length === 1) return sel; } catch {}
+        }
+        const parts = [];
+        let node = el;
+        while (node && node !== document.body && parts.length < 4) {
+          const tag = node.tagName.toLowerCase();
+          const parent = node.parentElement;
+          if (!parent) break;
+          const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
+          parts.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${siblings.indexOf(node) + 1})` : tag);
+          node = parent;
+        }
+        return parts.join(' > ');
+      };
+
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.opacity !== '0' &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+
+      const meta = {};
+      for (const m of document.querySelectorAll('meta[name], meta[property]')) {
+        const key = m.getAttribute('name') || m.getAttribute('property');
+        if (key) meta[key] = clean(m.getAttribute('content'), 300);
+      }
+
+      const headings = Array.from(document.querySelectorAll('h1,h2,h3'))
+        .filter(visible)
+        .slice(0, 40)
+        .map(h => ({ level: h.tagName.toLowerCase(), text: clean(h.innerText || h.textContent, 250), selector: selectorFor(h) }))
+        .filter(h => h.text);
+
+      const links = Array.from(document.querySelectorAll('a[href]'))
+        .filter(visible)
+        .slice(0, 250)
+        .map(a => ({ text: clean(a.innerText || a.textContent || a.getAttribute('aria-label'), 250), href: a.href, selector: selectorFor(a) }))
+        .filter(a => a.href);
+
+      const controls = Array.from(document.querySelectorAll('input,textarea,select,button,[role="button"],[role="link"],[contenteditable="true"]'))
+        .filter(visible)
+        .slice(0, 120)
+        .map(el => ({
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute('type') || '',
+          role: el.getAttribute('role') || '',
+          text: clean(el.innerText || el.textContent || el.value || el.placeholder || el.getAttribute('aria-label'), 250),
+          name: el.getAttribute('name') || '',
+          placeholder: el.getAttribute('placeholder') || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          selector: selectorFor(el),
+          disabled: !!el.disabled,
+        }));
+
+      const forms = Array.from(document.querySelectorAll('form'))
+        .filter(visible)
+        .slice(0, 20)
+        .map(form => ({
+          selector: selectorFor(form),
+          action: form.action || '',
+          method: form.method || '',
+          controls: Array.from(form.querySelectorAll('input,textarea,select,button')).slice(0, 40).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            type: el.getAttribute('type') || '',
+            name: el.getAttribute('name') || '',
+            placeholder: el.getAttribute('placeholder') || '',
+            ariaLabel: el.getAttribute('aria-label') || '',
+            text: clean(el.innerText || el.textContent || el.value, 150),
+            selector: selectorFor(el),
+          })),
+        }));
+
+      const bodyText = clean(document.body?.innerText || document.body?.textContent || '', 12000);
+      const phoneMatches = [...bodyText.matchAll(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g)].map(m => m[0]);
+      const emailMatches = [...bodyText.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)].map(m => m[0]);
+
+      return {
+        url: location.href,
+        title: document.title,
+        lang: document.documentElement.lang || '',
+        meta,
+        headings,
+        links,
+        controls,
+        forms,
+        contacts: {
+          phones: [...new Set(phoneMatches)].slice(0, 10),
+          emails: [...new Set(emailMatches)].slice(0, 10),
+        },
+        text: bodyText,
+      };
+    }
+  });
+
+  return result || null;
+}
+
 // ── Background URL Inspection and Exports ──
 
 function uniqueUrls(urls, maxUrls = 5) {
@@ -1441,6 +1574,7 @@ async function inspectOneUrlInBackground(url, index) {
     const tabInfo = await chrome.tabs.get(createdTab.id);
     let visualMap = '';
     let dom = '';
+    let domContext = null;
 
     try {
       visualMap = await collectAllFrameVisualMaps(createdTab.id);
@@ -1456,6 +1590,10 @@ async function inspectOneUrlInBackground(url, index) {
       );
       dom = domResponse?.dom || '';
     } catch { /* not every page allows DOM inspection */ }
+
+    try {
+      domContext = await extractDomIntelligence(createdTab.id);
+    } catch { /* structured DOM extraction is best effort */ }
 
     let pageLinks = [];
     try {
@@ -1478,6 +1616,7 @@ async function inspectOneUrlInBackground(url, index) {
       title: tabInfo.title || '',
       visualMap,
       dom,
+      domContext,
       pageLinks,
     };
   } catch (err) {
@@ -1526,6 +1665,20 @@ async function inspectUrlsInBackground(urls, maxUrls = 5) {
     if (result.visualMap) {
       lines.push('Visual map:');
       lines.push(result.visualMap.substring(0, 5000));
+    }
+    if (result.domContext) {
+      lines.push('DOM intelligence:');
+      lines.push(JSON.stringify({
+        title: result.domContext.title,
+        url: result.domContext.url,
+        meta: result.domContext.meta,
+        headings: result.domContext.headings?.slice(0, 20),
+        contacts: result.domContext.contacts,
+        controls: result.domContext.controls?.slice(0, 30),
+        forms: result.domContext.forms?.slice(0, 10),
+        links: result.domContext.links?.slice(0, 40),
+        text: result.domContext.text?.substring(0, 5000),
+      }, null, 2));
     }
     if (result.dom) {
       lines.push('DOM snippet:');
@@ -1679,6 +1832,17 @@ async function webSearchInBackground(action) {
   }
   lines.push('Visual map:');
   lines.push((result.visualMap || '').substring(0, 6000));
+  if (result.domContext) {
+    lines.push('DOM intelligence:');
+    lines.push(JSON.stringify({
+      title: result.domContext.title,
+      meta: result.domContext.meta,
+      headings: result.domContext.headings?.slice(0, 15),
+      contacts: result.domContext.contacts,
+      links: result.domContext.links?.slice(0, 30),
+      text: result.domContext.text?.substring(0, 4000),
+    }, null, 2));
+  }
   if (result.dom) {
     lines.push('DOM snippet:');
     lines.push(result.dom.substring(0, 2500));

@@ -29,6 +29,7 @@ A screenshot may be provided alongside the visual map. Use it to understand imag
 
 CAPABILITY MODEL:
 - You are not just the active tab. You can search the web in a background tab with web_search, inspect many URLs in inactive tabs with inspect_urls, list/switch tabs, extract visible DOM data, and export rows to CSV/JSON/XLS with export_data.
+- Page context may include both a Visual Page Map and DOM intelligence. Use DOM intelligence for metadata, headings, links, forms, controls, visible text, contacts, and page structure. Use the Visual Page Map for exact selectors and spatial interaction.
 - Prefer high-level/background tools before fragile UI choreography. Use active-page click/type only when the target element is visible and the task truly requires interacting with that page.
 - web_search is for public discovery, lead finding, research, and "find/list/look up" tasks. It avoids typing into search engines and returns filtered result links, not search-engine navigation chrome.
 - inspect_urls is for comparing multiple candidate pages before opening one. It avoids repetitive one-result-at-a-time browsing.
@@ -47,7 +48,11 @@ RULES:
 7. "actions" array is REQUIRED.
 8. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
 9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.
-10. DECISION POLICY BEFORE ACTIONS:
+10. DOM INTELLIGENCE:
+   - Prefer DOM intelligence for extracting business details, phone numbers, emails, websites, addresses, links, and form/control semantics.
+   - Prefer Visual Page Map selectors for click/type/select actions.
+   - If DOM intelligence and visual map disagree, trust visible/actionable elements for interaction and DOM text/meta for extraction.
+11. DECISION POLICY BEFORE ACTIONS:
    - Infer user intent first: public discovery/research, private account task, form-fill, navigation, extraction/export, or quiz.
    - If WEB SEARCH RESULTS or URL INSPECTION RESULTS are already provided, use them before taking new browsing actions.
    - NEVER invent credentials or type into email/username/password/login fields unless the user explicitly asked to log in and provided credentials.
@@ -55,13 +60,13 @@ RULES:
    - For discovery tasks, prefer this sequence: (a) use existing WEB SEARCH RESULTS, or web_search if none exist, (b) collect several result URLs, (c) use inspect_urls on several untried URLs at once, (d) extract structured findings into rows, (e) export_data the rows. Do not mark done after inspecting without exporting/listing findings.
    - Do NOT navigate to google.com/bing.com and type a search. Use web_search or navigate directly to a search-results URL.
    - Do NOT start public research by navigating to an auth-heavy site homepage/search page. Start with web_search and inspect public result URLs.
-11. MULTITASKING AND DEDUPE:
+12. MULTITASKING AND DEDUPE:
    - For public research, start with web_search. Do not start by navigating to a target site's home/login page.
    - Use inspect_urls to inspect multiple candidate pages before choosing which one to open in the active tab.
    - Do not revisit URLs, page names, or contractors listed in RUN MEMORY. Pick new candidates or broaden the query.
    - After inspect_urls returns URL INSPECTION RESULTS, use those results to decide next actions.
    - When exporting lead/research data, use export_data with rows of plain objects. Include phone/email/address when visible. Empty website means no website found/listed; notes should explain whether the page was blocked, partial, or confirmed.
-12. TAB SWITCH RULES:
+13. TAB SWITCH RULES:
    - You may use tab_switch with one of:
      {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"} OR {"type":"tab_switch","query":"facebook"}.
    - If user says "switch to another tab" and no index is provided, use {"type":"tab_switch","direction":"next"}.
@@ -475,6 +480,21 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       if (pageContext.visualMap) {
         textContent += `\n${pageContext.visualMap}\n`;
       }
+      if (pageContext.domContext) {
+        textContent += `\n=== DOM INTELLIGENCE ===\n${JSON.stringify({
+          title: pageContext.domContext.title,
+          url: pageContext.domContext.url,
+          meta: pageContext.domContext.meta,
+          headings: pageContext.domContext.headings?.slice(0, 25),
+          contacts: pageContext.domContext.contacts,
+          controls: pageContext.domContext.controls?.slice(0, 40),
+          forms: pageContext.domContext.forms?.slice(0, 12),
+          links: pageContext.domContext.links?.slice(0, 60),
+          text: pageContext.domContext.text?.substring(0, 7000),
+        }, null, 2)}\n=== END DOM INTELLIGENCE ===\n`;
+      } else if (pageContext.dom) {
+        textContent += `\n=== SIMPLIFIED DOM ===\n${String(pageContext.dom).substring(0, 7000)}\n=== END SIMPLIFIED DOM ===\n`;
+      }
     }
 
     // Inject vision analysis if we got one from the analyst step
@@ -599,6 +619,21 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       let textPart = `Command: ${userMessage}\nURL: ${pageContext.url}\nTitle: ${pageContext.title}\n`;
       if (pageContext.visualMap) {
         textPart += `\n${pageContext.visualMap}\n`;
+      }
+      if (pageContext.domContext) {
+        textPart += `\n=== DOM INTELLIGENCE ===\n${JSON.stringify({
+          title: pageContext.domContext.title,
+          url: pageContext.domContext.url,
+          meta: pageContext.domContext.meta,
+          headings: pageContext.domContext.headings?.slice(0, 25),
+          contacts: pageContext.domContext.contacts,
+          controls: pageContext.domContext.controls?.slice(0, 40),
+          forms: pageContext.domContext.forms?.slice(0, 12),
+          links: pageContext.domContext.links?.slice(0, 60),
+          text: pageContext.domContext.text?.substring(0, 7000),
+        }, null, 2)}\n=== END DOM INTELLIGENCE ===\n`;
+      } else if (pageContext.dom) {
+        textPart += `\n=== SIMPLIFIED DOM ===\n${String(pageContext.dom).substring(0, 7000)}\n=== END SIMPLIFIED DOM ===\n`;
       }
       content.push({ type: 'text', text: textPart });
 
