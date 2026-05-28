@@ -257,17 +257,53 @@ function commandLooksLikePublicDiscovery(command) {
   return /\b(look up|find|search|research|list|collect|contractors?|businesses?|companies?|pages?|profiles?)\b/i.test(command || '');
 }
 
-function commandLooksLikePublicFacebookDiscovery(command) {
-  return commandLooksLikePublicDiscovery(command) && /\bfacebook\b/i.test(command || '');
+const PUBLIC_DISCOVERY_DOMAINS = [
+  { pattern: /\bfacebook\b/i, domain: 'facebook.com', scope: 'site:facebook.com/pages', excludes: '-login -groups -marketplace' },
+  { pattern: /\blinkedin\b/i, domain: 'linkedin.com', scope: 'site:linkedin.com/company OR site:linkedin.com/in', excludes: '-login -jobs' },
+  { pattern: /\binstagram\b/i, domain: 'instagram.com', scope: 'site:instagram.com', excludes: '-login' },
+  { pattern: /\btiktok\b/i, domain: 'tiktok.com', scope: 'site:tiktok.com', excludes: '-login' },
+  { pattern: /\byelp\b/i, domain: 'yelp.com', scope: 'site:yelp.com/biz', excludes: '' },
+  { pattern: /\bgoogle maps?\b/i, domain: 'google.com', scope: 'site:google.com/maps', excludes: '' },
+  { pattern: /\bnextdoor\b/i, domain: 'nextdoor.com', scope: 'site:nextdoor.com', excludes: '-login' },
+];
+
+function getDiscoveryDomainHints(command) {
+  return PUBLIC_DISCOVERY_DOMAINS.filter(item => item.pattern.test(command || ''));
 }
 
-function buildPublicFacebookSearchQuery(command) {
-  const lower = (command || '').toLowerCase();
-  const trade = lower.includes('contractor') ? 'contractor OR contractors' : 'business OR company';
-  const noWebsite = /\b(no|without|missing)\s+(a\s+)?website\b/i.test(command || '')
-    ? ' "no website" OR "website not listed" OR "no web site"'
+function commandNeedsPublicDiscoveryBootstrap(command) {
+  return commandLooksLikePublicDiscovery(command);
+}
+
+function buildPublicDiscoverySearchQuery(command) {
+  const text = String(command || '').trim();
+  const hints = getDiscoveryDomainHints(text);
+  const lower = text.toLowerCase();
+
+  let terms = text
+    .replace(/\b(look up|find|search for|search|research|list|collect)\b/gi, ' ')
+    .replace(/\b(in|on|from)\s+(facebook|linkedin|instagram|tiktok|yelp|nextdoor|google maps?)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!terms) terms = text;
+
+  if (/\bcontractors?\b/.test(lower) && !/\bcontractors?\b/i.test(terms)) {
+    terms += ' contractors';
+  }
+
+  const noWebsite = /\b(no|without|missing|not listed)\s+(a\s+)?(web\s*sites?|websites?)\b/i.test(text) ||
+    /\bwithout\s+(a\s+)?websites?\s+listed\b/i.test(text);
+  const noWebsiteTerms = noWebsite
+    ? ' ("no website" OR "website not listed" OR "no web site" OR "website unavailable")'
     : '';
-  return `site:facebook.com/pages (${trade})${noWebsite} -login -groups -marketplace`;
+
+  const scopes = hints.length > 0
+    ? hints.map(h => h.scope).join(' OR ')
+    : '';
+  const excludes = hints.map(h => h.excludes).filter(Boolean).join(' ');
+  const query = `${scopes ? `${scopes} ` : ''}${terms}${noWebsiteTerms} ${excludes}`.trim();
+  return query.replace(/\s+/g, ' ');
 }
 
 function getActionMapLine(action, visualMap) {
@@ -312,10 +348,14 @@ function validateActionAgainstIntent(action, command, pageContext) {
 
   if (commandLooksLikePublicDiscovery(command) && action.type === 'navigate') {
     const url = normalizeUrlForMemory(action.url);
-    if (/^https:\/\/(www\.)?facebook\.com\/?(\?.*)?$/.test(url) ||
-        /^https:\/\/(www\.)?facebook\.com\/search(\/|\?)/.test(url) ||
-        /^https:\/\/(www\.)?facebook\.com\/login(\/|\?)/.test(url)) {
-      return 'Blocked direct Facebook login/search navigation for a public research task. Start with web_search using site:facebook.com, then inspect public result URLs.';
+    const hintedDomains = getDiscoveryDomainHints(command);
+    for (const hint of hintedDomains) {
+      const escapedDomain = hint.domain.replace(/\./g, '\\.');
+      const rootPattern = new RegExp(`^https://(www\\.)?${escapedDomain}/?(\\?.*)?$`);
+      const authOrSearchPattern = new RegExp(`^https://(www\\.)?${escapedDomain}/(login|signin|auth|search)(/|\\?)`, 'i');
+      if (rootPattern.test(url) || authOrSearchPattern.test(url)) {
+        return `Blocked direct ${hint.domain} home/login/search navigation for a public research task. Start with web_search, then inspect public result URLs.`;
+      }
     }
     if (/^https:\/\/(www\.)?google\.com\/?(\?.*)?$/.test(url) ||
         /^https:\/\/(www\.)?bing\.com\/?(\?.*)?$/.test(url)) {
@@ -648,20 +688,20 @@ async function handleExecuteCommand(command) {
     let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
     let lastInspectionResults = null; // Injected into the next step after inspect_urls
     const runMemory = { searches: new Set(), urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
-    const forcePublicFacebookSearch = commandLooksLikePublicFacebookDiscovery(command);
+    const bootstrapPublicDiscovery = commandNeedsPublicDiscoveryBootstrap(command);
 
-    if (forcePublicFacebookSearch) {
-      const query = buildPublicFacebookSearchQuery(command);
-      broadcastStatus('busy', 'Searching public Facebook results...');
-      broadcastLog('info', `Starting with public web search instead of Facebook login: "${query}"`);
+    if (bootstrapPublicDiscovery) {
+      const query = buildPublicDiscoverySearchQuery(command);
+      broadcastStatus('busy', 'Searching public web results...');
+      broadcastLog('info', `Starting with public web search instead of active-page browsing: "${query}"`);
       const searchResult = await webSearchInBackground({ type: 'web_search', query, maxResults: 15 });
       runMemory.searches.add(query.toLowerCase());
       if (searchResult?.text) {
         lastInspectionResults = searchResult.text;
         broadcastLog('info', searchResult.text.substring(0, 2000));
-        lastSummary = 'Started with public Facebook web search results.';
+        lastSummary = 'Started with public web search results.';
       } else {
-        lastGuardrailNotice = 'Initial public Facebook web search did not return usable results. Try a broader web_search query and do not navigate to Facebook login/search pages.';
+        lastGuardrailNotice = 'Initial public web search did not return usable results. Try a broader web_search query before using active-page navigation.';
       }
     }
 
@@ -750,12 +790,12 @@ async function handleExecuteCommand(command) {
       // Build message — mode-specific continuation prompts
       let message;
       if (step === 0) {
-        message = command;
+        message = `Command: ${command}\n\nController capabilities available now:\n- web_search(query): background web search for public discovery; use instead of typing into search engines.\n- inspect_urls(urls): inspect several candidate pages in inactive tabs without changing the active page.\n- export_data(rows, format): download structured findings for Excel/Sheets/JSON.\n- Active-page click/type/navigation: use only when a visible page interaction is necessary.\n\nChoose the highest-level reliable tool first.`;
         if (commandLooksLikePublicDiscovery(command)) {
-          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Use web_search first; do not navigate to facebook.com or google.com and type a query. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
+          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Use web_search first if no WEB SEARCH RESULTS are provided. Do not navigate to a target-site home/login page or to google.com/bing.com to type a query. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
         }
-        if (forcePublicFacebookSearch) {
-          message += '\n\nThe controller already performed the required public Facebook web_search before this first model turn. Use the provided WEB SEARCH RESULTS now. Do not navigate to facebook.com, do not click Log In, do not try Facebook search URLs, and do not switch tabs looking for Google.';
+        if (bootstrapPublicDiscovery) {
+          message += '\n\nThe controller already performed the required public web_search before this first model turn. Use the provided WEB SEARCH RESULTS now. Do not navigate to target-site home/login/search pages, do not use active-page Google typing, and do not switch tabs looking for a search page.';
         }
       } else if (executionMode === 'quiz') {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
