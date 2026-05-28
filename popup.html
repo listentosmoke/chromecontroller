@@ -29,18 +29,18 @@
       <div class="field">
         <label for="provider-select">AI Provider</label>
         <select id="provider-select">
+          <option value="alibaba">Alibaba Cloud (DashScope)</option>
           <option value="groq">Groq</option>
-          <option value="openrouter">OpenRouter</option>
         </select>
       </div>
 
       <div class="field">
         <label for="api-key-input">API Key</label>
         <div class="input-group">
-          <input type="password" id="api-key-input" placeholder="AIza..." autocomplete="off">
+          <input type="password" id="api-key-input" placeholder="sk-..." autocomplete="off">
           <button id="load-models-btn">Load Models</button>
         </div>
-        <p class="hint" id="key-hint">Get a key at <a id="key-hint-link" href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a></p>
+        <p class="hint" id="key-hint">Get a key at <a id="key-hint-link" href="https://www.alibabacloud.com/help/en/model-studio/get-api-key" target="_blank">Alibaba Cloud Model Studio docs</a></p>
       </div>
 
       <!-- Model select: hidden until models are loaded -->

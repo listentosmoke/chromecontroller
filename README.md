@@ -1,10 +1,10 @@
-# Gemini Browser Controller
+# AI Browser Controller
 
-A Chrome extension that uses Google's Gemini API to control your browser with natural language. Click, type, navigate, take screenshots, and manage tab groups — all by describing what you want in plain English.
+A Chrome extension that uses OpenAI-compatible chat APIs (default: Alibaba Cloud DashScope) to control your browser with natural language. Click, type, navigate, take screenshots, and manage tab groups — all by describing what you want in plain English.
 
 ## Features
 
-- **Natural Language Browser Control** — Tell Gemini what to do: "Click the login button", "Fill in the search box with cats", "Scroll down"
+- **Natural Language Browser Control** — Tell the AI what to do: "Click the login button", "Fill in the search box with cats", "Scroll down"
 - **Chrome DevTools Protocol** — Uses `chrome.debugger` for reliable screenshots and low-level browser control
 - **DOM Inspection** — Automatically builds a simplified DOM tree so Gemini understands the page structure
 - **Element Highlighting** — Visually shows which elements are being targeted during actions
@@ -42,7 +42,7 @@ A Chrome extension that uses Google's Gemini API to control your browser with na
 ## Setup
 
 1. Click the extension icon in your toolbar
-2. Enter your Gemini API key (get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey))
+2. Enter your Alibaba Cloud API key (DashScope compatible-mode) or Groq API key
 3. Click **Save** — the key is validated and stored locally
 
 ## Usage
@@ -75,7 +75,7 @@ List all open tabs and their groups
 ```
 manifest.json        — Extension manifest (Manifest V3)
 background.js        — Service worker: orchestrates everything
-gemini-api.js        — Gemini API client with conversation history
+ai-client.js         — Unified AI client with conversation history
 content.js           — Content script: DOM interaction and element targeting
 content.css          — Styles for element highlighting overlay
 popup.html/css/js    — Popup UI for quick access
@@ -96,9 +96,9 @@ icons/               — Extension icons
 
 ## API Key Security
 
-Your Gemini API key is stored locally in Chrome's extension storage (`chrome.storage.local`). It is never sent anywhere except directly to Google's Gemini API endpoints.
+Your API key is stored locally in Chrome's extension storage (`chrome.storage.local`). It is never sent anywhere except directly to your configured provider endpoint.
 
 ## Requirements
 
 - Google Chrome (version 114+)
-- A Google Gemini API key ([get one here](https://aistudio.google.com/apikey))
+- An API key for Alibaba Cloud DashScope compatible mode (or Groq)

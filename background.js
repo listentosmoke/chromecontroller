@@ -77,7 +77,7 @@ async function handleValidateKey(provider, apiKey, model) {
     groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL,
     searchEnabled:  !!saved.searchModel,
     searchModel:    saved.searchModel || '',
-    searchProvider: 'groq',
+    searchProvider: saved.searchProvider || provider,
     searchApiKey:   apiKey,
   });
   const result = await client.validateKey();
@@ -104,12 +104,12 @@ async function ensureClient() {
   const groqVisionModel = saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
   const searchEnabled   = !!saved.searchModel;
   const searchModel     = saved.searchModel || '';
-  const searchProvider  = 'groq';  // search always uses Groq compound models
+  const searchProvider  = saved.searchProvider || (saved.aiProvider || 'alibaba');
   const searchApiKey    = saved.aiApiKey;  // always uses primary API key
 
   // Rebuild if any relevant setting changed
   if (!aiClient ||
-      aiClient.provider !== (saved.aiProvider || 'groq') ||
+      aiClient.provider !== (saved.aiProvider || 'alibaba') ||
       aiClient.model !== saved.aiModel ||
       aiClient.apiKey !== saved.aiApiKey ||
       aiClient.groqVisionModel !== groqVisionModel ||
@@ -118,7 +118,7 @@ async function ensureClient() {
       aiClient.searchProvider !== searchProvider ||
       aiClient.searchApiKey   !== searchApiKey) {
     aiClient = new AIClient(
-      saved.aiProvider || 'groq',
+      saved.aiProvider || 'alibaba',
       saved.aiApiKey,
       saved.aiModel,
       { groqVisionModel, searchEnabled, searchModel, searchProvider, searchApiKey }
@@ -924,11 +924,44 @@ async function executeAction(action, tab, mode = 'normal') {
 
     case 'tab_switch':
       const allTabs = await chrome.tabs.query({ currentWindow: true });
-      if (action.index >= 0 && action.index < allTabs.length) {
-        await chrome.tabs.update(allTabs[action.index].id, { active: true });
+      const currentIndex = allTabs.findIndex(t => t.active);
+      const normalize = (v) => String(v || '').toLowerCase();
+      const query = normalize(action.query || action.title || action.urlContains || action.match);
+
+      let targetIndex = Number.isInteger(action.index) ? action.index : null;
+      if (targetIndex === null && typeof action.index === 'string' && action.index.trim() !== '') {
+        const parsed = Number.parseInt(action.index, 10);
+        if (Number.isInteger(parsed)) targetIndex = parsed;
+      }
+
+      // If model/user provided a destination query (e.g. "facebook"), match title/URL.
+      if (targetIndex === null && query) {
+        const start = currentIndex >= 0 ? currentIndex + 1 : 0;
+        for (let step = 0; step < allTabs.length; step++) {
+          const i = (start + step) % allTabs.length;
+          const t = allTabs[i];
+          if (normalize(t.title).includes(query) || normalize(t.url).includes(query)) {
+            targetIndex = i;
+            break;
+          }
+        }
+      }
+
+      if (targetIndex === null) {
+        const dir = (action.direction || '').toLowerCase();
+        if (dir === 'prev' || dir === 'previous' || dir === 'back') {
+          targetIndex = currentIndex <= 0 ? allTabs.length - 1 : currentIndex - 1;
+        } else {
+          // default "another tab" behavior: move to next tab cyclically
+          targetIndex = currentIndex >= allTabs.length - 1 ? 0 : currentIndex + 1;
+        }
+      }
+
+      if (targetIndex >= 0 && targetIndex < allTabs.length) {
+        await chrome.tabs.update(allTabs[targetIndex].id, { active: true });
         return { success: true };
       }
-      throw new Error(`Tab index ${action.index} out of range (0-${allTabs.length - 1})`);
+      throw new Error(`Tab index ${targetIndex} out of range (0-${allTabs.length - 1})`);
 
     case 'tab_list':
       return await listTabsAndGroups();
