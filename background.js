@@ -246,6 +246,71 @@ function extractQuestionKey(visualMap) {
   return null;
 }
 
+// ── Intent Guardrails ──
+
+function commandAllowsLogin(command) {
+  return /\b(log\s*in|sign\s*in|signin|authenticate|use (my|the) .{0,20}account|enter .{0,20}(credentials|password))\b/i.test(command || '');
+}
+
+function commandLooksLikePublicDiscovery(command) {
+  if (commandAllowsLogin(command)) return false;
+  return /\b(look up|find|search|research|list|collect|contractors?|businesses?|companies?|pages?|profiles?)\b/i.test(command || '');
+}
+
+function getActionMapLine(action, visualMap) {
+  if (!visualMap) return '';
+  const selectors = [action.selector, action.fromSelector, action.toSelector]
+    .filter(Boolean)
+    .map(String);
+  if (selectors.length === 0) return '';
+
+  return visualMap
+    .split('\n')
+    .find(line => selectors.some(sel => line.includes(sel))) || '';
+}
+
+function pageLooksLikeAuthWall(pageContext) {
+  const haystack = `${pageContext?.url || ''}\n${pageContext?.title || ''}\n${pageContext?.visualMap || ''}`.toLowerCase();
+  const hasCredentialInput = haystack.includes('input[password]') ||
+    /\b(password|email or mobile|email address|username)\b/.test(haystack);
+  const hasAuthAction = /\b(log in|login|sign in|signin|create new account|forgot password)\b/.test(haystack);
+  return hasCredentialInput && hasAuthAction;
+}
+
+function lineLooksLikeCredentialField(line) {
+  const lower = (line || '').toLowerCase();
+  return lower.includes('input[password]') ||
+    /\b(password|email or mobile|email address|username|phone number)\b/.test(lower);
+}
+
+function lineLooksLikeTextEntry(line) {
+  const lower = (line || '').toLowerCase();
+  return lower.includes('[*input') || lower.includes('[input') || lower.includes('[*textarea') || lower.includes('[textarea');
+}
+
+function lineLooksLikeLoginSubmit(line) {
+  const lower = (line || '').toLowerCase();
+  if (!/\b(log in|login|sign in|signin)\b/.test(lower)) return false;
+  return lower.includes('[*') || lower.includes('aria=') || lower.includes('role="button"');
+}
+
+function validateActionAgainstIntent(action, command, pageContext) {
+  if (!action || commandAllowsLogin(command)) return null;
+  if (!pageLooksLikeAuthWall(pageContext)) return null;
+
+  const line = getActionMapLine(action, pageContext?.visualMap);
+
+  if (action.type === 'type' && (lineLooksLikeCredentialField(line) || lineLooksLikeTextEntry(line))) {
+    return 'Blocked login-field typing because this command looks like public research, not a login task. Do not invent or enter credentials. Use public web search/site-specific Facebook search results instead.';
+  }
+
+  if (action.type === 'click' && lineLooksLikeLoginSubmit(line)) {
+    return 'Blocked login submission because this command looks like public research, not a login task. Do not log in. Back out to public search results or search the web for public Facebook contractor pages.';
+  }
+
+  return null;
+}
+
 // ── Visual Map Diffing (token optimization for quiz mode) ──
 
 function computeMapDiff(oldMap, newMap) {
@@ -363,6 +428,7 @@ async function handleExecuteCommand(command) {
     let lastFullVisualMap = null; // For diff-based snapshots in quiz mode
     let lastSearchResults = null; // Injected into the next step when search fires
     let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
+    let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -450,6 +516,9 @@ async function handleExecuteCommand(command) {
       let message;
       if (step === 0) {
         message = command;
+        if (commandLooksLikePublicDiscovery(command)) {
+          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages.';
+        }
       } else if (executionMode === 'quiz') {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
       } else {
@@ -460,6 +529,10 @@ async function handleExecuteCommand(command) {
       // Drag-and-drop questions need the answer mapping on each step (one tile per step).
       if (lastSearchResults) {
         message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer. For drag-and-drop, match EACH tile to the correct zone based on these results.`;
+      }
+      if (lastGuardrailNotice) {
+        message += `\n\n=== BLOCKED ACTION FEEDBACK ===\n${lastGuardrailNotice}\nChoose a different public-discovery strategy. Do not repeat the blocked login action.\n=== END BLOCKED ACTION FEEDBACK ===`;
+        lastGuardrailNotice = null;
       }
 
       let response = null;
@@ -490,7 +563,7 @@ async function handleExecuteCommand(command) {
           if (aiClient.conversationHistory.length >= 2) {
             aiClient.conversationHistory.splice(-2, 2);
           }
-          message = `IMPORTANT: You must output JSON with an "actions" array containing click/type/select actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations.\n\nTask: ${command}\n\nLook at the Visual Page Map above and output actions.`;
+          message = `IMPORTANT: You must output JSON with an "actions" array containing executable actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations. If this is a public research task and the page is a login/auth wall, do NOT type credentials or click Log In; use public search/navigation instead.\n\nTask: ${command}\n\nLook at the Visual Page Map above and output actions.`;
         }
       }
 
@@ -530,6 +603,7 @@ async function handleExecuteCommand(command) {
       broadcastLog('info', response.thinking || 'Planning actions...');
 
       let hitSnapshot = false;
+      let blockedAction = false;
       for (let i = 0; i < response.actions.length; i++) {
         if (shouldStop) break;
 
@@ -537,6 +611,15 @@ async function handleExecuteCommand(command) {
         broadcastLog('pending', `[${i + 1}/${response.actions.length}] ${action.type}: ${action.description || action.selector || action.url || ''}`);
 
         try {
+          const blockedReason = validateActionAgainstIntent(action, command, pageContext);
+          if (blockedReason) {
+            lastGuardrailNotice = blockedReason;
+            blockedAction = true;
+            broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} blocked: ${blockedReason}`);
+            hitSnapshot = true;
+            break;
+          }
+
           const result = await executeAction(action, tab, executionMode);
           const ok = result?.success !== false;
           broadcastLog(ok ? 'success' : 'error',
@@ -607,7 +690,7 @@ async function handleExecuteCommand(command) {
       // Check if AI says the task is done
       // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
       const isDone = response.done === true || response.done === 'true';
-      if (isDone && !(hitSnapshot && executionMode === 'quiz')) {
+      if (isDone && !blockedAction && !(hitSnapshot && executionMode === 'quiz')) {
         broadcastLog('info', `Complete: ${lastSummary}`);
         break;
       }
