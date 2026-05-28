@@ -1,4 +1,4 @@
-// ai-client.js — Unified AI client supporting Groq and OpenRouter
+// ai-client.js — Unified AI client supporting Groq and Alibaba Cloud DashScope
 
 // ── Normal mode: general-purpose browsing automation ──
 const SYSTEM_PROMPT_NORMAL = `You are a browser automation bot. Output ONLY valid JSON.
@@ -29,7 +29,17 @@ RULES:
 6. Set "done":true when the task is complete.
 7. "actions" array is REQUIRED.
 8. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
-9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.`;
+9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.
+10. DECISION POLICY BEFORE ACTIONS:
+   - Infer user intent first (research vs login vs form-fill vs navigation).
+   - NEVER type task keywords into email/username/password/login fields unless the user explicitly asked to log in.
+   - If page appears to be an auth wall (Log In / Sign Up / password fields) and task is research (e.g., "find contractors on Facebook"), avoid login fields. Prefer public discovery: web search, public pages, or site-specific search URLs.
+   - For discovery tasks, prefer this sequence: (a) open a search engine, (b) search "<topic> <site>", (c) open matching result links, (d) inspect results and extract.
+11. TAB SWITCH RULES:
+   - You may use tab_switch with one of:
+     {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"}.
+   - If user says "switch to another tab" and no index is provided, use {"type":"tab_switch","direction":"next"}.
+   - Use the === OPEN TABS === list to pick explicit indexes when the user asks for a specific tab.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.
@@ -95,12 +105,12 @@ export const PROVIDERS = {
     keyHelp: 'https://console.groq.com/keys',
     keyHelpText: 'console.groq.com/keys',
   },
-  openrouter: {
-    name: 'OpenRouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    keyPlaceholder: 'sk-or-...',
-    keyHelp: 'https://openrouter.ai/keys',
-    keyHelpText: 'openrouter.ai/keys',
+  alibaba: {
+    name: 'Alibaba Cloud (DashScope)',
+    baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    keyPlaceholder: 'sk-...',
+    keyHelp: 'https://www.alibabacloud.com/help/en/model-studio/get-api-key',
+    keyHelpText: 'Alibaba Cloud Model Studio key docs',
   },
 };
 
@@ -109,8 +119,8 @@ export const PROVIDERS = {
 export async function fetchModels(provider, apiKey) {
   if (provider === 'groq') {
     return await _fetchGroqModels(apiKey);
-  } else if (provider === 'openrouter') {
-    return await _fetchOpenRouterModels(apiKey);
+  } else if (provider === 'alibaba') {
+    return await _fetchAlibabaModels(apiKey);
   }
   throw new Error('Unknown provider: ' + provider);
 }
@@ -169,8 +179,8 @@ async function _fetchGroqModels(apiKey) {
   return models;
 }
 
-async function _fetchOpenRouterModels(apiKey) {
-  const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/models`, {
+async function _fetchAlibabaModels(apiKey) {
+  const response = await fetch(`${PROVIDERS.alibaba.baseUrl}/models`, {
     headers: {
       'Authorization': `Bearer ${apiKey}`,
     }
@@ -193,12 +203,8 @@ async function _fetchOpenRouterModels(apiKey) {
     });
   }
 
-  // Sort: free models first, then by name
-  models.sort((a, b) => {
-    if (a.isFree && !b.isFree) return -1;
-    if (!a.isFree && b.isFree) return 1;
-    return a.name.localeCompare(b.name);
-  });
+  // Sort by name for stable UX
+  models.sort((a, b) => a.name.localeCompare(b.name));
 
   return models;
 }
@@ -233,7 +239,7 @@ export class AIClient {
     const apiKey   = this.searchApiKey;
     const baseUrl  = provider === 'groq'
       ? PROVIDERS.groq.baseUrl
-      : PROVIDERS.openrouter.baseUrl;
+      : PROVIDERS.alibaba.baseUrl;
 
     // Strip provider prefix if using Groq API directly (e.g. "groq/compound-beta" → "compound-beta")
     const modelId = provider === 'groq'
@@ -275,10 +281,6 @@ Search the web and return the correct factual answer.`;
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${apiKey}`,
     };
-    if (provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'chrome-extension://ai-browser-controller';
-      headers['X-Title']      = 'AI Browser Controller';
-    }
 
     try {
       const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -314,8 +316,8 @@ Search the web and return the correct factual answer.`;
     try {
       if (this.provider === 'groq') {
         return await this._validateGroqKey();
-      } else if (this.provider === 'openrouter') {
-        return await this._validateOpenRouterKey();
+      } else if (this.provider === 'alibaba') {
+        return await this._validateAlibabaKey();
       }
       return { success: false, error: 'Unknown provider' };
     } catch (err) {
@@ -326,8 +328,8 @@ Search the web and return the correct factual answer.`;
   async sendMessage(userMessage, pageContext = null, mode = 'normal') {
     if (this.provider === 'groq') {
       return await this._sendGroq(userMessage, pageContext, mode);
-    } else if (this.provider === 'openrouter') {
-      return await this._sendOpenRouter(userMessage, pageContext, mode);
+    } else if (this.provider === 'alibaba') {
+      return await this._sendAlibaba(userMessage, pageContext, mode);
     }
     throw new Error('Unknown provider: ' + this.provider);
   }
@@ -538,10 +540,10 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
     return this._parseResponse(responseText);
   }
 
-  // ── OpenRouter Implementation (OpenAI-compatible) ──
+  // ── Alibaba Cloud DashScope Implementation (OpenAI-compatible) ──
 
-  async _validateOpenRouterKey() {
-    const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/models`, {
+  async _validateAlibabaKey() {
+    const response = await fetch(`${PROVIDERS.alibaba.baseUrl}/models`, {
       headers: {
         'Authorization': `Bearer ${this.apiKey}`,
       }
@@ -553,7 +555,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
     return { success: true };
   }
 
-  async _sendOpenRouter(userMessage, pageContext, mode = 'normal') {
+  async _sendAlibaba(userMessage, pageContext, mode = 'normal') {
     const systemPrompt = mode === 'quiz' ? SYSTEM_PROMPT_QUIZ : SYSTEM_PROMPT_NORMAL;
     const messages = [
       { role: 'system', content: systemPrompt }
@@ -593,27 +595,25 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
       response_format: { type: 'json_object' },
     };
 
-    const response = await fetch(`${PROVIDERS.openrouter.baseUrl}/chat/completions`, {
+    const response = await fetch(`${PROVIDERS.alibaba.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'chrome-extension://ai-browser-controller',
-        'X-Title': 'AI Browser Controller',
       },
       body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
       const err = await response.json();
-      throw new Error(err.error?.message || `OpenRouter API error: ${response.status}`);
+      throw new Error(err.error?.message || `Alibaba API error: ${response.status}`);
     }
 
     const data = await response.json();
     const responseText = data.choices?.[0]?.message?.content;
 
     if (!responseText) {
-      throw new Error('No response from OpenRouter');
+      throw new Error('No response from Alibaba API');
     }
 
     this.conversationHistory.push({ role: 'user', content: userMessage });

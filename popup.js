@@ -91,8 +91,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       showError('Groq API keys start with "gsk_".');
       return;
     }
-    if (provider === 'openrouter' && !key.startsWith('sk-or-')) {
-      showError('OpenRouter API keys start with "sk-or-".');
+    if (provider === 'alibaba' && !key.startsWith('sk-')) {
+      showError('Alibaba API keys usually start with "sk-".');
       return;
     }
 
@@ -140,35 +140,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    if (provider === 'openrouter') {
+    if (provider === 'alibaba') {
       // Group: free first, then paid
-      const freeModels = models.filter(m => m.isFree);
-      const paidModels = models.filter(m => !m.isFree);
-
-      if (freeModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Free (${freeModels.length})`;
-        for (const m of freeModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.name;
-          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
-          group.appendChild(opt);
-        }
-        modelSelect.appendChild(group);
-      }
-
-      if (paidModels.length > 0) {
-        const group = document.createElement('optgroup');
-        group.label = `Paid (${paidModels.length})`;
-        for (const m of paidModels) {
-          const opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.name;
-          if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
-          group.appendChild(opt);
-        }
-        modelSelect.appendChild(group);
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name;
+        if (m.contextLength) opt.title = `Context: ${(m.contextLength / 1000).toFixed(0)}k`;
+        modelSelect.appendChild(opt);
       }
     } else {
       // Groq: vision models first (in their own group), then text-only models
@@ -267,7 +246,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await chrome.storage.local.set({
       searchEnabled:  !!model,
       searchModel:    model,
-      searchProvider: 'groq',
+      searchProvider: providerSelect.value,
       searchApiKey:   '',  // always uses primary API key
     });
     // Force client rebuild to pick up new search settings
