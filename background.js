@@ -1145,6 +1145,7 @@ async function handleExecuteCommand(command) {
                   runMemory.exportCount++;
                   runMemory.exports.push(exportResult.data);
                   broadcastLog('success', exportResult.text);
+                  broadcastArtifact(exportResult.data);
                 }
               }
             }
@@ -1152,7 +1153,10 @@ async function handleExecuteCommand(command) {
             broadcastLog('info', result.text.substring(0, 2000));
           } else if (action.type === 'export_data' && result?.success !== false) {
             runMemory.exportCount++;
-            if (result.data) runMemory.exports.push(result.data);
+            if (result.data) {
+              runMemory.exports.push(result.data);
+              broadcastArtifact(result.data);
+            }
           } else if (result?.text && action.type !== 'search') {
             broadcastLog('info', result.text.substring(0, 2000));
           }
@@ -1279,7 +1283,7 @@ async function getPageContext(tab, mode = 'normal') {
   }
 
   try {
-    context.domContext = await extractDomIntelligence(tab.id);
+    context.domContext = await extractDomIntelligence(tab.id, true);
   } catch {
     // Structured DOM extraction is best effort; visual map still carries the page.
   }
@@ -1413,9 +1417,9 @@ async function collectAllFrameVisualMaps(tabId) {
   return merged.trim();
 }
 
-async function extractDomIntelligence(tabId) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
+async function extractDomIntelligence(tabId, allFrames = false) {
+  const injectedResults = await chrome.scripting.executeScript({
+    target: allFrames ? { tabId, allFrames: true } : { tabId },
     func: () => {
       const clean = (value, max = 500) => String(value || '')
         .replace(/\s+/g, ' ')
@@ -1533,7 +1537,48 @@ async function extractDomIntelligence(tabId) {
     }
   });
 
-  return result || null;
+  const frames = injectedResults
+    .filter(item => item?.result)
+    .map(item => ({ ...item.result, frameId: item.frameId }));
+
+  if (frames.length === 0) return null;
+
+  const topFrame = frames.find(frame => frame.frameId === 0) || frames[0];
+  if (!allFrames) return topFrame;
+
+  const mergedPhones = new Set(topFrame.contacts?.phones || []);
+  const mergedEmails = new Set(topFrame.contacts?.emails || []);
+  const mergedLinks = [...(topFrame.links || [])];
+  const mergedHeadings = [...(topFrame.headings || [])];
+
+  for (const frame of frames) {
+    if (frame === topFrame) continue;
+    (frame.contacts?.phones || []).forEach(phone => mergedPhones.add(phone));
+    (frame.contacts?.emails || []).forEach(email => mergedEmails.add(email));
+    mergedLinks.push(...(frame.links || []).map(link => ({ ...link, frameId: frame.frameId, frameUrl: frame.url })));
+    mergedHeadings.push(...(frame.headings || []).map(heading => ({ ...heading, frameId: frame.frameId, frameUrl: frame.url })));
+  }
+
+  return {
+    ...topFrame,
+    headings: mergedHeadings.slice(0, 80),
+    links: mergedLinks.slice(0, 350),
+    contacts: {
+      phones: Array.from(mergedPhones).slice(0, 20),
+      emails: Array.from(mergedEmails).slice(0, 20),
+    },
+    frames: frames.map(frame => ({
+      frameId: frame.frameId,
+      url: frame.url,
+      title: frame.title,
+      headings: (frame.headings || []).slice(0, 15),
+      contacts: frame.contacts,
+      controls: (frame.controls || []).slice(0, 20),
+      forms: (frame.forms || []).slice(0, 5),
+      links: (frame.links || []).slice(0, 25),
+      text: frame.text?.substring(0, 2500),
+    })),
+  };
 }
 
 // ── Background URL Inspection and Exports ──
@@ -1592,7 +1637,7 @@ async function inspectOneUrlInBackground(url, index) {
     } catch { /* not every page allows DOM inspection */ }
 
     try {
-      domContext = await extractDomIntelligence(createdTab.id);
+      domContext = await extractDomIntelligence(createdTab.id, true);
     } catch { /* structured DOM extraction is best effort */ }
 
     let pageLinks = [];
@@ -1677,6 +1722,7 @@ async function inspectUrlsInBackground(urls, maxUrls = 5) {
         controls: result.domContext.controls?.slice(0, 30),
         forms: result.domContext.forms?.slice(0, 10),
         links: result.domContext.links?.slice(0, 40),
+        frames: result.domContext.frames?.slice(0, 6),
         text: result.domContext.text?.substring(0, 5000),
       }, null, 2));
     }
@@ -1840,6 +1886,7 @@ async function webSearchInBackground(action) {
       headings: result.domContext.headings?.slice(0, 15),
       contacts: result.domContext.contacts,
       links: result.domContext.links?.slice(0, 30),
+      frames: result.domContext.frames?.slice(0, 4),
       text: result.domContext.text?.substring(0, 4000),
     }, null, 2));
   }
@@ -2312,6 +2359,11 @@ function broadcastStatus(status, text) {
 
 function broadcastLog(logType, text) {
   chrome.runtime.sendMessage({ type: 'ACTION_LOG', logType, text }).catch(() => {});
+}
+
+function broadcastArtifact(artifact) {
+  if (!artifact) return;
+  chrome.runtime.sendMessage({ type: 'ARTIFACT_CREATED', artifact }).catch(() => {});
 }
 
 function broadcastExecutionState(running) {

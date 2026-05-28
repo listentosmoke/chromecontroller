@@ -69,6 +69,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       addActionLogEntry(msg.logType, msg.text);
     }
 
+    if (msg.type === 'ARTIFACT_CREATED') {
+      addArtifactEntry(msg.artifact);
+    }
+
     if (msg.type === 'EXECUTION_STATE') {
       isExecuting = msg.running;
       sendBtn.disabled = msg.running;
@@ -159,6 +163,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     const entry = document.createElement('div');
     entry.className = `action-entry ${type}`;
     entry.innerHTML = `<span class="icon">${icons[type] || '\u2022'}</span><span>${escapeHtml(text)}</span>`;
+    currentActionLog.appendChild(entry);
+    scrollToBottom();
+  }
+
+  function addArtifactEntry(artifact) {
+    if (!currentActionLog) {
+      currentActionLog = createActionLog();
+    }
+
+    const filename = artifact?.filename || 'export';
+    const rows = artifact?.rows ? ` · ${artifact.rows} row(s)` : '';
+    const entry = document.createElement('div');
+    entry.className = 'action-entry artifact';
+    entry.innerHTML = `<span class="icon">▣</span><span>Artifact created: <strong>${escapeHtml(filename)}</strong>${escapeHtml(rows)}</span>`;
     currentActionLog.appendChild(entry);
     scrollToBottom();
   }

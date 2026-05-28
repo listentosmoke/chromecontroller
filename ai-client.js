@@ -30,6 +30,7 @@ A screenshot may be provided alongside the visual map. Use it to understand imag
 CAPABILITY MODEL:
 - You are not just the active tab. You can search the web in a background tab with web_search, inspect many URLs in inactive tabs with inspect_urls, list/switch tabs, extract visible DOM data, and export rows to CSV/JSON/XLS with export_data.
 - Page context may include both a Visual Page Map and DOM intelligence. Use DOM intelligence for metadata, headings, links, forms, controls, visible text, contacts, and page structure. Use the Visual Page Map for exact selectors and spatial interaction.
+- DOM intelligence may include same-page frames. Use frame summaries to discover content hidden inside embedded frames; include frameId in actions only when the Visual Page Map marks an iframe section with that frameId.
 - Prefer high-level/background tools before fragile UI choreography. Use active-page click/type only when the target element is visible and the task truly requires interacting with that page.
 - web_search is for public discovery, lead finding, research, and "find/list/look up" tasks. It avoids typing into search engines and returns filtered result links, not search-engine navigation chrome.
 - inspect_urls is for comparing multiple candidate pages before opening one. It avoids repetitive one-result-at-a-time browsing.
@@ -490,6 +491,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
           controls: pageContext.domContext.controls?.slice(0, 40),
           forms: pageContext.domContext.forms?.slice(0, 12),
           links: pageContext.domContext.links?.slice(0, 60),
+          frames: pageContext.domContext.frames?.slice(0, 6),
           text: pageContext.domContext.text?.substring(0, 7000),
         }, null, 2)}\n=== END DOM INTELLIGENCE ===\n`;
       } else if (pageContext.dom) {
@@ -630,6 +632,7 @@ Output plain text. Do NOT output JSON. Do NOT decide actions — only describe w
           controls: pageContext.domContext.controls?.slice(0, 40),
           forms: pageContext.domContext.forms?.slice(0, 12),
           links: pageContext.domContext.links?.slice(0, 60),
+          frames: pageContext.domContext.frames?.slice(0, 6),
           text: pageContext.domContext.text?.substring(0, 7000),
         }, null, 2)}\n=== END DOM INTELLIGENCE ===\n`;
       } else if (pageContext.dom) {
