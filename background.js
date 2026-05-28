@@ -257,6 +257,19 @@ function commandLooksLikePublicDiscovery(command) {
   return /\b(look up|find|search|research|list|collect|contractors?|businesses?|companies?|pages?|profiles?)\b/i.test(command || '');
 }
 
+function commandLooksLikePublicFacebookDiscovery(command) {
+  return commandLooksLikePublicDiscovery(command) && /\bfacebook\b/i.test(command || '');
+}
+
+function buildPublicFacebookSearchQuery(command) {
+  const lower = (command || '').toLowerCase();
+  const trade = lower.includes('contractor') ? 'contractor OR contractors' : 'business OR company';
+  const noWebsite = /\b(no|without|missing)\s+(a\s+)?website\b/i.test(command || '')
+    ? ' "no website" OR "website not listed" OR "no web site"'
+    : '';
+  return `site:facebook.com/pages (${trade})${noWebsite} -login -groups -marketplace`;
+}
+
 function getActionMapLine(action, visualMap) {
   if (!visualMap) return '';
   const selectors = [action.selector, action.fromSelector, action.toSelector]
@@ -351,6 +364,15 @@ function validateActionShape(action) {
   if (action.type === 'evaluate' && !action.expression) return 'evaluate action is missing required "expression".';
   if (action.type === 'select' && action.value === undefined) return 'select action is missing required "value".';
   if (action.type === 'web_search' && !action.query) return 'web_search action is missing required "query".';
+  if (action.type === 'tab_switch' &&
+      action.index === undefined &&
+      !action.direction &&
+      !action.query &&
+      !action.title &&
+      !action.urlContains &&
+      !action.match) {
+    return 'tab_switch requires "index", "direction", or "query". For public research, prefer web_search instead of switching tabs.';
+  }
   if (action.type === 'inspect_urls' && (!Array.isArray(action.urls) || action.urls.length === 0)) {
     return 'inspect_urls action requires a non-empty "urls" array.';
   }
@@ -626,6 +648,22 @@ async function handleExecuteCommand(command) {
     let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
     let lastInspectionResults = null; // Injected into the next step after inspect_urls
     const runMemory = { searches: new Set(), urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
+    const forcePublicFacebookSearch = commandLooksLikePublicFacebookDiscovery(command);
+
+    if (forcePublicFacebookSearch) {
+      const query = buildPublicFacebookSearchQuery(command);
+      broadcastStatus('busy', 'Searching public Facebook results...');
+      broadcastLog('info', `Starting with public web search instead of Facebook login: "${query}"`);
+      const searchResult = await webSearchInBackground({ type: 'web_search', query, maxResults: 15 });
+      runMemory.searches.add(query.toLowerCase());
+      if (searchResult?.text) {
+        lastInspectionResults = searchResult.text;
+        broadcastLog('info', searchResult.text.substring(0, 2000));
+        lastSummary = 'Started with public Facebook web search results.';
+      } else {
+        lastGuardrailNotice = 'Initial public Facebook web search did not return usable results. Try a broader web_search query and do not navigate to Facebook login/search pages.';
+      }
+    }
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -715,6 +753,9 @@ async function handleExecuteCommand(command) {
         message = command;
         if (commandLooksLikePublicDiscovery(command)) {
           message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Use web_search first; do not navigate to facebook.com or google.com and type a query. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
+        }
+        if (forcePublicFacebookSearch) {
+          message += '\n\nThe controller already performed the required public Facebook web_search before this first model turn. Use the provided WEB SEARCH RESULTS now. Do not navigate to facebook.com, do not click Log In, do not try Facebook search URLs, and do not switch tabs looking for Google.';
         }
       } else if (executionMode === 'quiz') {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
