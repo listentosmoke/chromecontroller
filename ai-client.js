@@ -15,7 +15,7 @@ type: add "text","clearFirst" | select: add "value" | navigate: add "url" | eval
 drag: {"type":"drag","fromSelector":"sel","toSelector":"sel","frameId":N} — drag element from source to target
 web_search: {"type":"web_search","query":"contractors near Dallas without website listed","maxResults":10} — inspect a search-results page in a background tab without typing into a search engine
 inspect_urls: {"type":"inspect_urls","urls":["https://..."],"maxUrls":5} — inspect multiple public pages in inactive background tabs without changing the current tab
-export_data: {"type":"export_data","filename":"contractors.csv","format":"csv","rows":[{"name":"...","facebookUrl":"...","website":"","notes":"..."}]} — download structured findings for Excel/Sheets
+export_data: {"type":"export_data","filename":"leads.csv","format":"csv","rows":[{"name":"...","sourceUrl":"...","platform":"...","phone":"...","website":"","email":"","address":"","notes":"...","confidence":"medium"}]} — download structured findings for Excel/Sheets
 tab_switch supports:
   {"type":"tab_switch","index":N}
   {"type":"tab_switch","direction":"next|prev"}
@@ -35,6 +35,7 @@ CAPABILITY MODEL:
 - export_data is for any task that produces leads, tables, records, or structured findings.
 - RUN MEMORY lists searches, URLs, clicks, and names already tried. Treat it as state, not advice.
 - Lead/research tasks should produce a table/list. Use export_data with rows containing name, sourceUrl, platform, phone, website, email, address, notes, and confidence. Use empty strings for unknown fields.
+- The controller may automatically compile/export lead rows from inspect_urls results. If an artifact is already exported, continue only when more coverage is needed; otherwise summarize the artifact and remaining caveats.
 
 RULES:
 1. Output ONLY JSON. No markdown, no prose.

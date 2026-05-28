@@ -570,11 +570,146 @@ function addNamesFromRows(rows, runMemory) {
   }
 }
 
+function getPlatformFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function normalizeLeadName(title, url) {
+  let name = String(title || '').trim();
+  name = name
+    .replace(/\s*[\-|]\s*(Facebook|Instagram|LinkedIn|Yelp|TikTok).*$/i, '')
+    .replace(/\s*-\s*About\s*$/i, '')
+    .replace(/\s*\(@[^)]+\)\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (name) return name;
+
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    return decodeURIComponent(parts[0] || parsed.hostname).replace(/[-_]/g, ' ');
+  } catch {
+    return '';
+  }
+}
+
+function uniqueMatches(text, regex, limit = 5) {
+  const seen = new Set();
+  const results = [];
+  for (const match of String(text || '').matchAll(regex)) {
+    const value = (match[0] || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    results.push(value);
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+function extractAddress(text) {
+  const withoutPhones = String(text || '').replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g, ' ');
+  const match = withoutPhones.match(/\b\d{2,6}\s+[A-Za-z0-9.'#\- ]{3,80}\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Boulevard|Way|Ct|Court|Cir|Circle|Pkwy|Parkway)\b(?:[, ]+[A-Za-z .'-]{2,40})?(?:[, ]+[A-Z]{2})?(?:\s+\d{5}(?:-\d{4})?)?/i);
+  return match ? match[0].replace(/\s+/g, ' ').trim() : '';
+}
+
+function isLikelyExternalWebsite(href, sourceUrl) {
+  if (!href || !/^https?:\/\//i.test(href)) return false;
+  try {
+    const url = new URL(href);
+    const host = url.hostname.replace(/^www\./, '');
+    const sourceHost = new URL(sourceUrl).hostname.replace(/^www\./, '');
+    if (host === sourceHost) return false;
+    if (/(^|\.)facebook\.com$|(^|\.)m\.facebook\.com$|(^|\.)instagram\.com$|(^|\.)linkedin\.com$|(^|\.)tiktok\.com$|(^|\.)yelp\.com$/.test(host)) return false;
+    if (/(^|\.)google\.com$|(^|\.)bing\.com$|(^|\.)duckduckgo\.com$|(^|\.)accounts\.google\.com$|(^|\.)support\.google\.com$|(^|\.)meta\.com$/.test(host)) return false;
+    if (/\/(login|signin|signup|recover|privacy|terms)(\/|$)/i.test(url.pathname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractWebsite(pageLinks, sourceUrl) {
+  const link = (Array.isArray(pageLinks) ? pageLinks : []).find(l => isLikelyExternalWebsite(l.href, sourceUrl));
+  return link?.href || '';
+}
+
+function extractLeadRowFromInspection(result) {
+  if (!result?.success) return null;
+
+  const sourceUrl = result.finalUrl || result.requestedUrl || '';
+  const platform = getPlatformFromUrl(sourceUrl);
+  const combinedText = [
+    result.title,
+    result.visualMap,
+    result.dom,
+    ...(Array.isArray(result.pageLinks) ? result.pageLinks.map(l => `${l.text || ''} ${l.href || ''}`) : [])
+  ].join('\n');
+
+  const phones = uniqueMatches(combinedText, /(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g, 3);
+  const emails = uniqueMatches(combinedText, /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, 3);
+  const website = extractWebsite(result.pageLinks, sourceUrl);
+  const address = extractAddress(combinedText);
+  const isAuthWall = /\b(Log In|Forgot Account|Email or phone|Password|See more on Facebook)\b/i.test(combinedText) ||
+    combinedText.toLowerCase().includes('input[password]');
+
+  const notes = [];
+  if (!website) notes.push('No external website found/listed in inspected public content.');
+  if (isAuthWall) notes.push('Page appears partially blocked by login wall; details may be incomplete.');
+  if (!phones.length) notes.push('No phone found in inspected public content.');
+  if (!emails.length) notes.push('No email found in inspected public content.');
+
+  const confidence = website
+    ? 'low'
+    : (phones.length || emails.length || address ? (isAuthWall ? 'medium' : 'high') : 'medium');
+
+  return {
+    name: normalizeLeadName(result.title, sourceUrl),
+    sourceUrl,
+    platform,
+    phone: phones.join('; '),
+    website,
+    email: emails.join('; '),
+    address,
+    notes: notes.join(' '),
+    confidence,
+  };
+}
+
+function addLeadRowsFromInspectionResults(results, runMemory) {
+  if (!Array.isArray(results)) return [];
+  const added = [];
+  for (const result of results) {
+    const row = extractLeadRowFromInspection(result);
+    if (!row?.sourceUrl) continue;
+    const key = normalizeUrlForMemory(row.sourceUrl);
+    if (!key || runMemory.leadRowUrls.has(key)) continue;
+    runMemory.leadRowUrls.add(key);
+    runMemory.leadRows.push(row);
+    added.push(row);
+  }
+  addNamesFromRows(added, runMemory);
+  return added;
+}
+
+function slugForFilename(text) {
+  return String(text || 'research')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .substring(0, 60) || 'research';
+}
+
 function formatRunMemory(runMemory) {
   const urls = Array.from(runMemory.urls).slice(-12);
   const searches = Array.from(runMemory.searches).slice(-8);
   const candidates = Array.from(runMemory.candidates.values()).slice(-12);
   const names = Array.from(runMemory.names).slice(-12);
+  const leadRows = runMemory.leadRows.slice(-8);
   const notes = runMemory.notes.slice(-6);
   const lines = ['=== RUN MEMORY ==='];
   if (searches.length > 0) lines.push(`Searches already tried: ${searches.join(' | ')}`);
@@ -583,6 +718,12 @@ function formatRunMemory(runMemory) {
   }
   if (urls.length > 0) lines.push(`Tried URLs: ${urls.join(' | ')}`);
   if (names.length > 0) lines.push(`Known names/leads: ${names.join(' | ')}`);
+  if (leadRows.length > 0) {
+    lines.push('Compiled lead rows: ' + leadRows.map(r => `${r.name || '(unnamed)'} | phone=${r.phone || ''} | website=${r.website || ''} | source=${r.sourceUrl}`).join(' || '));
+  }
+  if (runMemory.exports.length > 0) {
+    lines.push('Artifacts exported: ' + runMemory.exports.map(e => e.filename).join(' | '));
+  }
   if (notes.length > 0) lines.push(`Notes: ${notes.join(' | ')}`);
   if (runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
     lines.push('Next expected step: compile inspected findings into export_data rows, or inspect fresh candidate URLs if required fields are still missing.');
@@ -718,6 +859,9 @@ async function handleExecuteCommand(command) {
       names: new Set(),
       notes: [],
       candidates: new Map(),
+      leadRows: [],
+      leadRowUrls: new Set(),
+      exports: [],
       inspectCount: 0,
       exportCount: 0,
     };
@@ -850,7 +994,8 @@ async function handleExecuteCommand(command) {
         lastGuardrailNotice = null;
       }
       if (runMemory.searches.size > 0 || runMemory.urls.size > 0 || runMemory.names.size > 0 ||
-          runMemory.notes.length > 0 || runMemory.candidates.size > 0 || runMemory.inspectCount > 0) {
+          runMemory.notes.length > 0 || runMemory.candidates.size > 0 || runMemory.inspectCount > 0 ||
+          runMemory.leadRows.length > 0 || runMemory.exports.length > 0) {
         message += `\n\n${formatRunMemory(runMemory)}`;
       }
 
@@ -980,10 +1125,30 @@ async function handleExecuteCommand(command) {
             broadcastLog('info', result.text.substring(0, 2000));
           } else if (action.type === 'inspect_urls' && result?.text) {
             runMemory.inspectCount++;
+            const addedRows = commandLooksLikePublicDiscovery(command)
+              ? addLeadRowsFromInspectionResults(result.fullResults, runMemory)
+              : [];
+            if (addedRows.length > 0) {
+              broadcastLog('info', `Compiled ${addedRows.length} lead row(s) from inspected pages.`);
+              if (runMemory.exportCount === 0) {
+                const exportResult = await exportDataFile({
+                  type: 'export_data',
+                  filename: `${slugForFilename(command)}-leads.csv`,
+                  format: 'csv',
+                  rows: runMemory.leadRows,
+                });
+                if (exportResult?.success !== false) {
+                  runMemory.exportCount++;
+                  runMemory.exports.push(exportResult.data);
+                  broadcastLog('success', exportResult.text);
+                }
+              }
+            }
             lastInspectionResults = result.text;
             broadcastLog('info', result.text.substring(0, 2000));
           } else if (action.type === 'export_data' && result?.success !== false) {
             runMemory.exportCount++;
+            if (result.data) runMemory.exports.push(result.data);
           } else if (result?.text && action.type !== 'search') {
             broadcastLog('info', result.text.substring(0, 2000));
           }
@@ -1048,7 +1213,9 @@ async function handleExecuteCommand(command) {
       // In quiz mode, ignore done=true if we broke at a snapshot (model assumed all actions ran)
       const isDone = response.done === true || response.done === 'true';
       if (isDone && commandLooksLikePublicDiscovery(command) && runMemory.inspectCount > 0 && runMemory.exportCount === 0) {
-        lastGuardrailNotice = 'Do not mark a lead/research task done after inspection without compiling results. Use export_data with rows containing name, sourceUrl, platform, phone, website, email, address, notes, and confidence. Use empty strings for unknown fields and notes for blocked/partial pages.';
+        lastGuardrailNotice = runMemory.leadRows.length > 0
+          ? 'Lead rows have been compiled but not exported. Use export_data now.'
+          : 'Do not mark a lead/research task done after inspection without compiling results. Use export_data with rows containing name, sourceUrl, platform, phone, website, email, address, notes, and confidence. Use empty strings for unknown fields and notes for blocked/partial pages.';
         broadcastLog('info', 'Continuing so inspected findings can be exported.');
         await new Promise(r => setTimeout(r, 300));
         continue;
@@ -1067,7 +1234,13 @@ async function handleExecuteCommand(command) {
     broadcastStatus('ready', 'Ready');
     broadcastExecutionState(false);
 
-    return { result: lastSummary || 'Actions completed.' };
+    const artifactSummary = runMemory?.exports?.length
+      ? `\n\nArtifacts: ${runMemory.exports.map(e => e.filename).join(', ')}`
+      : '';
+    const rowSummary = runMemory?.leadRows?.length
+      ? `\nCompiled ${runMemory.leadRows.length} lead row(s).`
+      : '';
+    return { result: `${lastSummary || 'Actions completed.'}${rowSummary}${artifactSummary}` };
   } catch (err) {
     broadcastStatus('error', 'Error');
     broadcastExecutionState(false);
@@ -1365,6 +1538,7 @@ async function inspectUrlsInBackground(urls, maxUrls = 5) {
   return {
     success: true,
     text: lines.join('\n'),
+    fullResults: results,
     data: results.map(r => ({
       success: r.success,
       requestedUrl: r.requestedUrl,

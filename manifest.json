@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Browser Controller",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "AI-powered browser controller using Groq and OpenRouter. Click, type, navigate, and manage tabs with natural language.",
   "permissions": [
     "activeTab",
