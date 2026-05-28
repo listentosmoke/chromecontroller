@@ -77,7 +77,7 @@ async function handleValidateKey(provider, apiKey, model) {
     groqVisionModel: saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL,
     searchEnabled:  !!saved.searchModel,
     searchModel:    saved.searchModel || '',
-    searchProvider: 'groq',
+    searchProvider: saved.searchProvider || provider,
     searchApiKey:   apiKey,
   });
   const result = await client.validateKey();
@@ -104,12 +104,12 @@ async function ensureClient() {
   const groqVisionModel = saved.groqVisionModel || GROQ_DEFAULT_VISION_MODEL;
   const searchEnabled   = !!saved.searchModel;
   const searchModel     = saved.searchModel || '';
-  const searchProvider  = 'groq';  // search always uses Groq compound models
+  const searchProvider  = saved.searchProvider || (saved.aiProvider || 'alibaba');
   const searchApiKey    = saved.aiApiKey;  // always uses primary API key
 
   // Rebuild if any relevant setting changed
   if (!aiClient ||
-      aiClient.provider !== (saved.aiProvider || 'groq') ||
+      aiClient.provider !== (saved.aiProvider || 'alibaba') ||
       aiClient.model !== saved.aiModel ||
       aiClient.apiKey !== saved.aiApiKey ||
       aiClient.groqVisionModel !== groqVisionModel ||
@@ -118,7 +118,7 @@ async function ensureClient() {
       aiClient.searchProvider !== searchProvider ||
       aiClient.searchApiKey   !== searchApiKey) {
     aiClient = new AIClient(
-      saved.aiProvider || 'groq',
+      saved.aiProvider || 'alibaba',
       saved.aiApiKey,
       saved.aiModel,
       { groqVisionModel, searchEnabled, searchModel, searchProvider, searchApiKey }
