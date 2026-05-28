@@ -29,7 +29,17 @@ RULES:
 6. Set "done":true when the task is complete.
 7. "actions" array is REQUIRED.
 8. Elements marked [draggable] can be dragged. Use drag action with fromSelector and toSelector.
-9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.`;
+9. When a screenshot is provided and IMG elements have no text, examine the screenshot to identify what images depict (equations, charts, diagrams) and use that understanding to choose the correct answer or drag target.
+10. DECISION POLICY BEFORE ACTIONS:
+   - Infer user intent first (research vs login vs form-fill vs navigation).
+   - NEVER type task keywords into email/username/password/login fields unless the user explicitly asked to log in.
+   - If page appears to be an auth wall (Log In / Sign Up / password fields) and task is research (e.g., "find contractors on Facebook"), avoid login fields. Prefer public discovery: web search, public pages, or site-specific search URLs.
+   - For discovery tasks, prefer this sequence: (a) open a search engine, (b) search "<topic> <site>", (c) open matching result links, (d) inspect results and extract.
+11. TAB SWITCH RULES:
+   - You may use tab_switch with one of:
+     {"type":"tab_switch","index":N} OR {"type":"tab_switch","direction":"next"} OR {"type":"tab_switch","direction":"prev"}.
+   - If user says "switch to another tab" and no index is provided, use {"type":"tab_switch","direction":"next"}.
+   - Use the === OPEN TABS === list to pick explicit indexes when the user asks for a specific tab.`;
 
 // ── Quiz mode: strict one-question-at-a-time for assessments ──
 const SYSTEM_PROMPT_QUIZ = `You are a browser automation bot in QUIZ MODE. Output ONLY valid JSON.

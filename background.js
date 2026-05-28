@@ -924,11 +924,29 @@ async function executeAction(action, tab, mode = 'normal') {
 
     case 'tab_switch':
       const allTabs = await chrome.tabs.query({ currentWindow: true });
-      if (action.index >= 0 && action.index < allTabs.length) {
-        await chrome.tabs.update(allTabs[action.index].id, { active: true });
+      const currentIndex = allTabs.findIndex(t => t.active);
+
+      let targetIndex = Number.isInteger(action.index) ? action.index : null;
+      if (targetIndex === null && typeof action.index === 'string' && action.index.trim() !== '') {
+        const parsed = Number.parseInt(action.index, 10);
+        if (Number.isInteger(parsed)) targetIndex = parsed;
+      }
+
+      if (targetIndex === null) {
+        const dir = (action.direction || '').toLowerCase();
+        if (dir === 'prev' || dir === 'previous' || dir === 'back') {
+          targetIndex = currentIndex <= 0 ? allTabs.length - 1 : currentIndex - 1;
+        } else {
+          // default "another tab" behavior: move to next tab cyclically
+          targetIndex = currentIndex >= allTabs.length - 1 ? 0 : currentIndex + 1;
+        }
+      }
+
+      if (targetIndex >= 0 && targetIndex < allTabs.length) {
+        await chrome.tabs.update(allTabs[targetIndex].id, { active: true });
         return { success: true };
       }
-      throw new Error(`Tab index ${action.index} out of range (0-${allTabs.length - 1})`);
+      throw new Error(`Tab index ${targetIndex} out of range (0-${allTabs.length - 1})`);
 
     case 'tab_list':
       return await listTabsAndGroups();
