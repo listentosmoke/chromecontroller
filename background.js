@@ -311,6 +311,131 @@ function validateActionAgainstIntent(action, command, pageContext) {
   return null;
 }
 
+function normalizeUrlForMemory(url) {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    if (parsed.pathname !== '/') {
+      parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    }
+    return parsed.toString().toLowerCase();
+  } catch {
+    return String(url).trim().toLowerCase();
+  }
+}
+
+function extractLineText(line) {
+  if (!line) return '';
+  const textMatch = line.match(/sel="[^"]*"\s+"([^"]+)"/);
+  if (textMatch) return textMatch[1].trim();
+  const ariaMatch = line.match(/aria="([^"]+)"/);
+  return ariaMatch ? ariaMatch[1].trim() : '';
+}
+
+function extractLineHref(line) {
+  return line?.match(/href="([^"]+)"/)?.[1] || '';
+}
+
+function getActionMemoryTarget(action, pageContext) {
+  if (!action) return null;
+
+  if (action.type === 'navigate' || action.type === 'tab_new') {
+    const url = normalizeUrlForMemory(action.url);
+    return url ? { kind: 'url', key: url, label: action.url } : null;
+  }
+
+  if (action.type === 'click') {
+    const line = getActionMapLine(action, pageContext?.visualMap);
+    const href = normalizeUrlForMemory(extractLineHref(line));
+    if (href) return { kind: 'url', key: href, label: extractLineHref(line) };
+
+    const text = extractLineText(line);
+    if (text) {
+      const pageUrl = normalizeUrlForMemory(pageContext?.url || '');
+      return { kind: 'click', key: `${pageUrl}|${action.selector}|${text}`.toLowerCase(), label: text };
+    }
+  }
+
+  return null;
+}
+
+function getActionDuplicateReason(action, pageContext, runMemory) {
+  if (action?.type === 'inspect_urls') {
+    const urls = Array.isArray(action.urls) ? action.urls : [];
+    const freshUrls = [];
+    const skippedUrls = [];
+
+    for (const url of urls) {
+      const key = normalizeUrlForMemory(url);
+      if (!key) continue;
+      if (runMemory.urls.has(key)) {
+        skippedUrls.push(url);
+      } else {
+        freshUrls.push(url);
+      }
+    }
+
+    action.urls = freshUrls;
+    if (skippedUrls.length > 0) {
+      runMemory.notes.push(`Skipped already-inspected URLs: ${skippedUrls.slice(0, 5).join(', ')}`);
+    }
+    if (freshUrls.length === 0 && urls.length > 0) {
+      return 'All requested URLs were already tried in this run. Choose different contractor/page candidates or broaden the search query.';
+    }
+    return null;
+  }
+
+  const target = getActionMemoryTarget(action, pageContext);
+  if (!target) return null;
+
+  const seen = target.kind === 'url'
+    ? runMemory.urls.has(target.key)
+    : runMemory.clicks.has(target.key);
+
+  if (!seen) return null;
+  return `Already tried ${target.kind === 'url' ? 'URL' : 'target'} "${target.label}". Choose a new result instead of repeating it.`;
+}
+
+function recordActionTarget(action, pageContext, runMemory) {
+  if (action?.type === 'inspect_urls' && Array.isArray(action.urls)) {
+    for (const url of action.urls) {
+      const key = normalizeUrlForMemory(url);
+      if (key) runMemory.urls.add(key);
+    }
+    return;
+  }
+
+  const target = getActionMemoryTarget(action, pageContext);
+  if (!target) return;
+  if (target.kind === 'url') {
+    runMemory.urls.add(target.key);
+  } else {
+    runMemory.clicks.add(target.key);
+  }
+}
+
+function addNamesFromRows(rows, runMemory) {
+  if (!Array.isArray(rows)) return;
+  for (const row of rows) {
+    const name = row?.name || row?.business || row?.contractor || row?.company;
+    if (name) runMemory.names.add(String(name).trim().toLowerCase());
+  }
+}
+
+function formatRunMemory(runMemory) {
+  const urls = Array.from(runMemory.urls).slice(-12);
+  const names = Array.from(runMemory.names).slice(-12);
+  const notes = runMemory.notes.slice(-6);
+  const lines = ['=== RUN MEMORY ==='];
+  if (urls.length > 0) lines.push(`Tried URLs: ${urls.join(' | ')}`);
+  if (names.length > 0) lines.push(`Known names/leads: ${names.join(' | ')}`);
+  if (notes.length > 0) lines.push(`Notes: ${notes.join(' | ')}`);
+  lines.push('Avoid repeating these. Inspect fresh URLs or broaden the query when stuck.');
+  lines.push('=== END RUN MEMORY ===');
+  return lines.join('\n');
+}
+
 // ── Visual Map Diffing (token optimization for quiz mode) ──
 
 function computeMapDiff(oldMap, newMap) {
@@ -429,6 +554,8 @@ async function handleExecuteCommand(command) {
     let lastSearchResults = null; // Injected into the next step when search fires
     let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
     let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
+    let lastInspectionResults = null; // Injected into the next step after inspect_urls
+    const runMemory = { urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -517,7 +644,7 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
         if (commandLooksLikePublicDiscovery(command)) {
-          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages.';
+          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
         }
       } else if (executionMode === 'quiz') {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
@@ -530,9 +657,16 @@ async function handleExecuteCommand(command) {
       if (lastSearchResults) {
         message += `\n\n=== SEARCH RESULTS ===\n${lastSearchResults}\n=== END SEARCH RESULTS ===\n\nUse the search results above to select the correct answer. For drag-and-drop, match EACH tile to the correct zone based on these results.`;
       }
+      if (lastInspectionResults) {
+        message += `\n\n${lastInspectionResults}\n\nUse these URL inspection results to extract facts, avoid opening pages that are clearly blocked, and choose fresh candidates.`;
+        lastInspectionResults = null;
+      }
       if (lastGuardrailNotice) {
         message += `\n\n=== BLOCKED ACTION FEEDBACK ===\n${lastGuardrailNotice}\nChoose a different public-discovery strategy. Do not repeat the blocked login action.\n=== END BLOCKED ACTION FEEDBACK ===`;
         lastGuardrailNotice = null;
+      }
+      if (runMemory.urls.size > 0 || runMemory.names.size > 0 || runMemory.notes.length > 0) {
+        message += `\n\n${formatRunMemory(runMemory)}`;
       }
 
       let response = null;
@@ -620,6 +754,20 @@ async function handleExecuteCommand(command) {
             break;
           }
 
+          const duplicateReason = getActionDuplicateReason(action, pageContext, runMemory);
+          if (duplicateReason) {
+            lastGuardrailNotice = duplicateReason;
+            blockedAction = true;
+            broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} skipped: ${duplicateReason}`);
+            hitSnapshot = true;
+            break;
+          }
+
+          recordActionTarget(action, pageContext, runMemory);
+          if (action.type === 'export_data') {
+            addNamesFromRows(normalizeExportRows(action), runMemory);
+          }
+
           const result = await executeAction(action, tab, executionMode);
           const ok = result?.success !== false;
           broadcastLog(ok ? 'success' : 'error',
@@ -632,6 +780,9 @@ async function handleExecuteCommand(command) {
           if (action.type === 'search' && result?.text) {
             lastSearchResults = result.text;
             broadcastLog('info', `Search answer: ${result.text.substring(0, 600)}`);
+          } else if (action.type === 'inspect_urls' && result?.text) {
+            lastInspectionResults = result.text;
+            broadcastLog('info', result.text.substring(0, 2000));
           } else if (result?.text && action.type !== 'search') {
             broadcastLog('info', result.text.substring(0, 2000));
           }
@@ -667,6 +818,7 @@ async function handleExecuteCommand(command) {
         //   tab_new / tab_switch — new page loaded; must snapshot before clicking anything
         //   drag (quiz only)     — verify placement before next drag
         const isBreakPoint = action.type === 'snapshot' || action.type === 'screenshot' || action.type === 'search'
+          || action.type === 'inspect_urls' || action.type === 'export_data'
           || action.type === 'tab_new' || action.type === 'tab_switch';
         if (isBreakPoint) {
           if (i < response.actions.length - 1) {
@@ -867,6 +1019,221 @@ async function collectAllFrameVisualMaps(tabId) {
   return merged.trim();
 }
 
+// ── Background URL Inspection and Exports ──
+
+function uniqueUrls(urls, maxUrls = 5) {
+  const seen = new Set();
+  const result = [];
+  for (const raw of Array.isArray(urls) ? urls : []) {
+    if (!raw) continue;
+    let normalized;
+    try {
+      normalized = new URL(raw).toString();
+    } catch {
+      continue;
+    }
+    const key = normalizeUrlForMemory(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= maxUrls) break;
+  }
+  return result;
+}
+
+async function inspectOneUrlInBackground(url, index) {
+  let createdTab = null;
+  try {
+    createdTab = await chrome.tabs.create({ url, active: false });
+    await waitForTabLoad(createdTab.id, 20000);
+
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: createdTab.id, allFrames: true },
+        files: ['content.js']
+      });
+    } catch { /* restricted page */ }
+
+    const tabInfo = await chrome.tabs.get(createdTab.id);
+    let visualMap = '';
+    let dom = '';
+
+    try {
+      visualMap = await collectAllFrameVisualMaps(createdTab.id);
+    } catch (err) {
+      visualMap = `[Could not collect visual map: ${err.message}]`;
+    }
+
+    try {
+      const domResponse = await chrome.tabs.sendMessage(
+        createdTab.id,
+        { type: 'GET_PAGE_CONTEXT' },
+        { frameId: 0 }
+      );
+      dom = domResponse?.dom || '';
+    } catch { /* not every page allows DOM inspection */ }
+
+    return {
+      success: true,
+      index,
+      requestedUrl: url,
+      finalUrl: tabInfo.url || url,
+      title: tabInfo.title || '',
+      visualMap,
+      dom,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      index,
+      requestedUrl: url,
+      error: err.message,
+    };
+  } finally {
+    if (createdTab?.id) {
+      await chrome.tabs.remove(createdTab.id).catch(() => {});
+    }
+  }
+}
+
+async function inspectUrlsInBackground(urls, maxUrls = 5) {
+  const candidates = uniqueUrls(urls, Math.min(Math.max(maxUrls || 5, 1), 10));
+  if (candidates.length === 0) {
+    return { success: false, text: 'No valid URLs provided for inspection.' };
+  }
+
+  const concurrency = Math.min(3, candidates.length);
+  const results = new Array(candidates.length);
+  let next = 0;
+
+  async function worker() {
+    while (next < candidates.length) {
+      const index = next++;
+      results[index] = await inspectOneUrlInBackground(candidates[index], index + 1);
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const lines = ['=== URL INSPECTION RESULTS ==='];
+  for (const result of results) {
+    lines.push('');
+    lines.push(`[${result.index}] ${result.requestedUrl}`);
+    if (!result.success) {
+      lines.push(`ERROR: ${result.error}`);
+      continue;
+    }
+    lines.push(`Final URL: ${result.finalUrl}`);
+    lines.push(`Title: ${result.title}`);
+    if (result.visualMap) {
+      lines.push('Visual map:');
+      lines.push(result.visualMap.substring(0, 5000));
+    }
+    if (result.dom) {
+      lines.push('DOM snippet:');
+      lines.push(result.dom.substring(0, 2500));
+    }
+  }
+  lines.push('');
+  lines.push('=== END URL INSPECTION RESULTS ===');
+
+  return {
+    success: true,
+    text: lines.join('\n'),
+    data: results.map(r => ({
+      success: r.success,
+      requestedUrl: r.requestedUrl,
+      finalUrl: r.finalUrl,
+      title: r.title,
+      error: r.error,
+    })),
+  };
+}
+
+function normalizeExportRows(action) {
+  if (Array.isArray(action.rows)) return action.rows;
+  if (Array.isArray(action.data)) return action.data;
+  if (action.data && typeof action.data === 'object') return [action.data];
+  return [];
+}
+
+function escapeCsvValue(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildCsv(rows) {
+  const headers = Array.from(rows.reduce((set, row) => {
+    Object.keys(row || {}).forEach(k => set.add(k));
+    return set;
+  }, new Set()));
+  const lines = [headers.map(escapeCsvValue).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map(header => escapeCsvValue(row?.[header])).join(','));
+  }
+  return lines.join('\r\n');
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildExcelHtml(rows) {
+  const headers = Array.from(rows.reduce((set, row) => {
+    Object.keys(row || {}).forEach(k => set.add(k));
+    return set;
+  }, new Set()));
+  const head = headers.map(h => `<th>${escapeHtml(h)}</th>`).join('');
+  const body = rows.map(row =>
+    `<tr>${headers.map(h => `<td>${escapeHtml(typeof row?.[h] === 'object' ? JSON.stringify(row[h]) : row?.[h])}</td>`).join('')}</tr>`
+  ).join('\n');
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`;
+}
+
+async function exportDataFile(action) {
+  const rows = normalizeExportRows(action);
+  if (rows.length === 0) {
+    return { success: false, text: 'No rows provided to export.' };
+  }
+
+  const format = (action.format || 'csv').toLowerCase();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const extension = format === 'json' ? 'json' : (format === 'xls' || format === 'excel' ? 'xls' : 'csv');
+  const filename = action.filename || `ai-browser-export-${timestamp}.${extension}`;
+
+  let content;
+  let mime;
+  if (format === 'json') {
+    content = JSON.stringify(rows, null, 2);
+    mime = 'application/json';
+  } else if (format === 'xls' || format === 'excel') {
+    content = buildExcelHtml(rows);
+    mime = 'application/vnd.ms-excel';
+  } else {
+    content = buildCsv(rows);
+    mime = 'text/csv';
+  }
+
+  const url = `data:${mime};charset=utf-8,${encodeURIComponent(content)}`;
+  const downloadId = await chrome.downloads.download({
+    url,
+    filename,
+    saveAs: action.saveAs === true,
+    conflictAction: 'uniquify',
+  });
+
+  return {
+    success: true,
+    text: `Exported ${rows.length} row(s) to ${filename}`,
+    data: { downloadId, filename, rows: rows.length },
+  };
+}
+
 // ── Action Execution ──
 
 async function executeAction(action, tab, mode = 'normal') {
@@ -944,6 +1311,14 @@ async function executeAction(action, tab, mode = 'normal') {
       }
       return { success: true, text: answer };
     }
+
+    case 'inspect_urls': {
+      broadcastLog('info', `Inspecting ${Array.isArray(action.urls) ? action.urls.length : 0} URL(s) in background tabs`);
+      return await inspectUrlsInBackground(action.urls || [], action.maxUrls || action.limit || 5);
+    }
+
+    case 'export_data':
+      return await exportDataFile(action);
 
     case 'snapshot': {
       if (mode === 'quiz') {
