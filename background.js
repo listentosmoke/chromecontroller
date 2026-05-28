@@ -296,6 +296,27 @@ function lineLooksLikeLoginSubmit(line) {
 
 function validateActionAgainstIntent(action, command, pageContext) {
   if (!action || commandAllowsLogin(command)) return null;
+
+  if (commandLooksLikePublicDiscovery(command) && action.type === 'navigate') {
+    const url = normalizeUrlForMemory(action.url);
+    if (/^https:\/\/(www\.)?facebook\.com\/?(\?.*)?$/.test(url) ||
+        /^https:\/\/(www\.)?facebook\.com\/search(\/|\?)/.test(url) ||
+        /^https:\/\/(www\.)?facebook\.com\/login(\/|\?)/.test(url)) {
+      return 'Blocked direct Facebook login/search navigation for a public research task. Start with web_search using site:facebook.com, then inspect public result URLs.';
+    }
+    if (/^https:\/\/(www\.)?google\.com\/?(\?.*)?$/.test(url) ||
+        /^https:\/\/(www\.)?bing\.com\/?(\?.*)?$/.test(url)) {
+      return 'Blocked search-engine home navigation for a public research task. Use web_search with the query instead of opening Google/Bing and typing.';
+    }
+  }
+
+  if (commandLooksLikePublicDiscovery(command) && action.type === 'type') {
+    const currentUrl = normalizeUrlForMemory(pageContext?.url || '');
+    if (/^https:\/\/(www\.)?(google|bing)\.com\//.test(currentUrl)) {
+      return 'Blocked typing into a search-engine page for public research. Use web_search with the query so search does not depend on fragile DOM typing.';
+    }
+  }
+
   if (!pageLooksLikeAuthWall(pageContext)) return null;
 
   const line = getActionMapLine(action, pageContext?.visualMap);
@@ -306,6 +327,38 @@ function validateActionAgainstIntent(action, command, pageContext) {
 
   if (action.type === 'click' && lineLooksLikeLoginSubmit(line)) {
     return 'Blocked login submission because this command looks like public research, not a login task. Do not log in. Back out to public search results or search the web for public Facebook contractor pages.';
+  }
+
+  return null;
+}
+
+function validateActionShape(action) {
+  if (!action || typeof action !== 'object') return 'Action must be an object.';
+  if (!action.type) return 'Action is missing required "type".';
+
+  const needsSelector = new Set(['click', 'type', 'hover', 'extract', 'select']);
+  if (needsSelector.has(action.type) && !action.selector) {
+    return `${action.type} action is missing required "selector". Use a selector from the current Visual Page Map, or use web_search/navigate when no DOM target is needed.`;
+  }
+
+  if (action.type === 'type' && (action.text === undefined || action.text === null || String(action.text).length === 0)) {
+    return 'type action is missing required "text". For search tasks, prefer web_search instead of typing into Google.';
+  }
+
+  if (action.type === 'navigate' && !action.url) return 'navigate action is missing required "url".';
+  if (action.type === 'tab_new' && action.url !== undefined && typeof action.url !== 'string') return 'tab_new url must be a string.';
+  if (action.type === 'keyboard' && !action.key) return 'keyboard action is missing required "key".';
+  if (action.type === 'evaluate' && !action.expression) return 'evaluate action is missing required "expression".';
+  if (action.type === 'select' && action.value === undefined) return 'select action is missing required "value".';
+  if (action.type === 'web_search' && !action.query) return 'web_search action is missing required "query".';
+  if (action.type === 'inspect_urls' && (!Array.isArray(action.urls) || action.urls.length === 0)) {
+    return 'inspect_urls action requires a non-empty "urls" array.';
+  }
+  if (action.type === 'export_data' && normalizeExportRows(action).length === 0) {
+    return 'export_data action requires non-empty "rows" or "data".';
+  }
+  if (action.type === 'drag' && (!(action.fromSelector || action.selector) || !action.toSelector)) {
+    return 'drag action requires "fromSelector" (or selector) and "toSelector".';
   }
 
   return null;
@@ -361,6 +414,15 @@ function getActionMemoryTarget(action, pageContext) {
 }
 
 function getActionDuplicateReason(action, pageContext, runMemory) {
+  if (action?.type === 'web_search') {
+    const query = String(action.query || '').trim().toLowerCase();
+    if (!query) return null;
+    if (runMemory.searches.has(query)) {
+      return `Already searched for "${action.query}". Broaden or change the query instead of repeating it.`;
+    }
+    return null;
+  }
+
   if (action?.type === 'inspect_urls') {
     const urls = Array.isArray(action.urls) ? action.urls : [];
     const freshUrls = [];
@@ -398,6 +460,12 @@ function getActionDuplicateReason(action, pageContext, runMemory) {
 }
 
 function recordActionTarget(action, pageContext, runMemory) {
+  if (action?.type === 'web_search') {
+    const query = String(action.query || '').trim().toLowerCase();
+    if (query) runMemory.searches.add(query);
+    return;
+  }
+
   if (action?.type === 'inspect_urls' && Array.isArray(action.urls)) {
     for (const url of action.urls) {
       const key = normalizeUrlForMemory(url);
@@ -425,9 +493,11 @@ function addNamesFromRows(rows, runMemory) {
 
 function formatRunMemory(runMemory) {
   const urls = Array.from(runMemory.urls).slice(-12);
+  const searches = Array.from(runMemory.searches).slice(-8);
   const names = Array.from(runMemory.names).slice(-12);
   const notes = runMemory.notes.slice(-6);
   const lines = ['=== RUN MEMORY ==='];
+  if (searches.length > 0) lines.push(`Searches already tried: ${searches.join(' | ')}`);
   if (urls.length > 0) lines.push(`Tried URLs: ${urls.join(' | ')}`);
   if (names.length > 0) lines.push(`Known names/leads: ${names.join(' | ')}`);
   if (notes.length > 0) lines.push(`Notes: ${notes.join(' | ')}`);
@@ -555,7 +625,7 @@ async function handleExecuteCommand(command) {
     let lastSearchedQuestion = null; // Track last searched question to avoid re-searching
     let lastGuardrailNotice = null; // Explains blocked unsafe actions to the next model turn
     let lastInspectionResults = null; // Injected into the next step after inspect_urls
-    const runMemory = { urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
+    const runMemory = { searches: new Set(), urls: new Set(), clicks: new Set(), names: new Set(), notes: [] };
 
     const maxSteps = () => executionMode === 'quiz' ? 25 : 15;
 
@@ -644,7 +714,7 @@ async function handleExecuteCommand(command) {
       if (step === 0) {
         message = command;
         if (commandLooksLikePublicDiscovery(command)) {
-          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
+          message += '\n\nIntent hint: This is a public discovery/research task. Do not log in or enter credentials. If a target site shows an auth wall, use public search results, site-specific search URLs, or already-visible public pages. Use web_search first; do not navigate to facebook.com or google.com and type a query. Collect several candidate URLs and use inspect_urls to inspect them in background tabs before opening any one result. Track unique leads and use export_data when you have useful rows.';
         }
       } else if (executionMode === 'quiz') {
         message = `Continue: ${command}\n\nStep ${step} done. Look at the IFRAME section for the current question. Navigation/lesson buttons (Next, Start Lesson, Check Answer, Submit) are on the OUTER PAGE — use NO frameId for them.\n\nYou MUST:\n1) Read the question text carefully.\n2) In your "thinking" field, reason through the answer — state the question, consider each option, explain why one is correct.\n3) Click the CORRECT answer(s). Radio = one answer. Checkboxes = multiple correct.\n4) For drag-and-drop: use the "drag" action with fromSelector and toSelector — it will click the source item then click the drop target. Do ONE item at a time, then snapshot to verify before doing the next.\n5) Click Next (outer page, no frameId), then snapshot.\n\nIf an answer is already selected, verify it. If wrong, fix it. If a modal appears, click Cancel and answer first. Set done=true ONLY when ALL items are complete.`;
@@ -665,7 +735,7 @@ async function handleExecuteCommand(command) {
         message += `\n\n=== BLOCKED ACTION FEEDBACK ===\n${lastGuardrailNotice}\nChoose a different public-discovery strategy. Do not repeat the blocked login action.\n=== END BLOCKED ACTION FEEDBACK ===`;
         lastGuardrailNotice = null;
       }
-      if (runMemory.urls.size > 0 || runMemory.names.size > 0 || runMemory.notes.length > 0) {
+      if (runMemory.searches.size > 0 || runMemory.urls.size > 0 || runMemory.names.size > 0 || runMemory.notes.length > 0) {
         message += `\n\n${formatRunMemory(runMemory)}`;
       }
 
@@ -697,7 +767,7 @@ async function handleExecuteCommand(command) {
           if (aiClient.conversationHistory.length >= 2) {
             aiClient.conversationHistory.splice(-2, 2);
           }
-          message = `IMPORTANT: You must output JSON with an "actions" array containing executable actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations. If this is a public research task and the page is a login/auth wall, do NOT type credentials or click Log In; use public search/navigation instead.\n\nTask: ${command}\n\nLook at the Visual Page Map above and output actions.`;
+          message = `IMPORTANT: You must output JSON with an "actions" array containing executable actions. Do NOT answer questions yourself — click the answers on the page. Do NOT write prose or explanations. If this is a public research task, use web_search instead of typing into Google. If the page is a login/auth wall, do NOT type credentials or click Log In; use public search/navigation instead.\n\nTask: ${command}\n\nLook at the Visual Page Map above and output actions.`;
         }
       }
 
@@ -745,6 +815,15 @@ async function handleExecuteCommand(command) {
         broadcastLog('pending', `[${i + 1}/${response.actions.length}] ${action.type}: ${action.description || action.selector || action.url || ''}`);
 
         try {
+          const shapeReason = validateActionShape(action);
+          if (shapeReason) {
+            lastGuardrailNotice = `Invalid action: ${shapeReason}`;
+            blockedAction = true;
+            broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type || 'action'} invalid: ${shapeReason}`);
+            hitSnapshot = true;
+            break;
+          }
+
           const blockedReason = validateActionAgainstIntent(action, command, pageContext);
           if (blockedReason) {
             lastGuardrailNotice = blockedReason;
@@ -780,7 +859,7 @@ async function handleExecuteCommand(command) {
           if (action.type === 'search' && result?.text) {
             lastSearchResults = result.text;
             broadcastLog('info', `Search answer: ${result.text.substring(0, 600)}`);
-          } else if (action.type === 'inspect_urls' && result?.text) {
+          } else if ((action.type === 'inspect_urls' || action.type === 'web_search') && result?.text) {
             lastInspectionResults = result.text;
             broadcastLog('info', result.text.substring(0, 2000));
           } else if (result?.text && action.type !== 'search') {
@@ -809,7 +888,11 @@ async function handleExecuteCommand(command) {
             } catch { /* ignore */ }
           }
         } catch (err) {
+          lastGuardrailNotice = `Action failed: ${action.type} ${action.selector || action.url || action.query || ''} - ${err.message}. Do not repeat the same failed action. If this was search typing, use web_search instead.`;
+          blockedAction = true;
+          hitSnapshot = true;
           broadcastLog('error', `[${i + 1}/${response.actions.length}] ${action.type} failed: ${err.message}`);
+          break;
         }
 
         // Break the action batch at boundaries that require the AI to re-evaluate:
@@ -818,7 +901,7 @@ async function handleExecuteCommand(command) {
         //   tab_new / tab_switch — new page loaded; must snapshot before clicking anything
         //   drag (quiz only)     — verify placement before next drag
         const isBreakPoint = action.type === 'snapshot' || action.type === 'screenshot' || action.type === 'search'
-          || action.type === 'inspect_urls' || action.type === 'export_data'
+          || action.type === 'web_search' || action.type === 'inspect_urls' || action.type === 'export_data'
           || action.type === 'tab_new' || action.type === 'tab_switch';
         if (isBreakPoint) {
           if (i < response.actions.length - 1) {
@@ -1150,6 +1233,63 @@ async function inspectUrlsInBackground(urls, maxUrls = 5) {
   };
 }
 
+function buildSearchUrl(query, engine = 'google') {
+  const encoded = encodeURIComponent(query || '');
+  if ((engine || '').toLowerCase() === 'bing') {
+    return `https://www.bing.com/search?q=${encoded}`;
+  }
+  return `https://www.google.com/search?q=${encoded}&udm=14`;
+}
+
+function extractLinksFromVisualMap(visualMap, maxLinks = 20) {
+  if (!visualMap) return [];
+  const links = [];
+  const seen = new Set();
+  for (const line of visualMap.split('\n')) {
+    const href = extractLineHref(line);
+    if (!href || seen.has(href)) continue;
+    const text = extractLineText(line);
+    links.push({ text, href });
+    seen.add(href);
+    if (links.length >= maxLinks) break;
+  }
+  return links;
+}
+
+async function webSearchInBackground(action) {
+  const query = action.query || '';
+  const url = buildSearchUrl(query, action.engine);
+  const result = await inspectOneUrlInBackground(url, 1);
+  if (!result.success) {
+    return { success: false, text: `Search failed for "${query}": ${result.error}` };
+  }
+
+  const links = extractLinksFromVisualMap(result.visualMap, action.maxResults || 20);
+  const lines = ['=== WEB SEARCH RESULTS ==='];
+  lines.push(`Query: ${query}`);
+  lines.push(`Search URL: ${url}`);
+  lines.push(`Title: ${result.title}`);
+  if (links.length > 0) {
+    lines.push('Links:');
+    for (const [index, link] of links.entries()) {
+      lines.push(`[${index + 1}] ${link.text || '(no title)'} - ${link.href}`);
+    }
+  }
+  lines.push('Visual map:');
+  lines.push((result.visualMap || '').substring(0, 6000));
+  if (result.dom) {
+    lines.push('DOM snippet:');
+    lines.push(result.dom.substring(0, 2500));
+  }
+  lines.push('=== END WEB SEARCH RESULTS ===');
+
+  return {
+    success: true,
+    text: lines.join('\n'),
+    data: { query, url, links },
+  };
+}
+
 function normalizeExportRows(action) {
   if (Array.isArray(action.rows)) return action.rows;
   if (Array.isArray(action.data)) return action.data;
@@ -1310,6 +1450,11 @@ async function executeAction(action, tab, mode = 'normal') {
         return { success: false, text: 'Search returned no results.' };
       }
       return { success: true, text: answer };
+    }
+
+    case 'web_search': {
+      broadcastLog('info', `Searching web in a background tab: "${action.query}"`);
+      return await webSearchInBackground(action);
     }
 
     case 'inspect_urls': {
